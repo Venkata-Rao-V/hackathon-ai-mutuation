@@ -55,12 +55,12 @@ class TestAgent:
 # ══════════════════════════════════════════════════════════════
 
 class MutationAgent:
-    """Runs mutmut and returns a list of surviving mutant IDs."""
+    """Runs mutmut and returns a list of surviving mutations."""
 
     def __init__(self, project_root: str):
         self.root = project_root
 
-    def run(self) -> list[int]:
+    def run(self) -> list[dict]:
         _banner("Agent 2 · MutationAgent", "🧬", "Running mutmut…")
         run_out = subprocess.run(
             ["mutmut", "run"],
@@ -76,12 +76,12 @@ class MutationAgent:
         )
         print("📊 Results:\n", res_out.stdout)
 
-        ids = self._parse_surviving(res_out.stdout)
-        if ids:   
-                print(f"⚠️  {len(ids)} mutant(s) survived: {ids}")
+        mutations = self._parse_surviving(res_out.stdout)
+        if mutations:   
+                print(f"⚠️  {len(mutations)} mutant(s) survived: {mutations}")
         else:
                 print("✅ No surviving mutants!")
-        return ids
+        return mutations
 
     def get_diff(self, mutant_id: int) -> str:
         r = subprocess.run(
@@ -90,19 +90,72 @@ class MutationAgent:
         )
         return r.stdout
 
-
     @staticmethod
-    def _parse_surviving(output: str) -> list[int]:
-        ids = []
+    def parse_diff(diff_text):
+        original = None
+        mutated = None
+
+        for line in diff_text.splitlines():
+            if line.startswith("-"):
+                original = line[1:].strip()
+
+            if line.startswith("+"):
+                mutated = line[1:].strip()
+
+        return {
+            "original": original,
+            "mutated": mutated
+        }
+    
+    @staticmethod
+    def extract_location(diff_text):
+        file_name = None
+        line_number = None
+
+        for line in diff_text.splitlines():
+
+            if line.startswith("--- "):
+                file_name = line[4:].strip()
+
+            match = re.search(r'@@ -(\d+)', line)
+            if match:
+                line_number = int(match.group(1))
+
+        return file_name, line_number
+
+    def get_mutant_details(self, mutant_id: str) -> str:
+        result = subprocess.run(
+            ["mutmut", "show", mutant_id],
+            cwd=self.root,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout
+
+    def _parse_surviving(self, output: str) -> list[dict]:
+        mutations = []
         for line in output.splitlines():
+            line = line.strip()
             if "survived" in line.lower():
                 match = re.search(r"__mutmut_(\d+)", line)
+                match = re.search(r"^([^:]+):", line)
                 if match:
-                    ids.append(int(match.group(1)))
-        return ids
-
-
-# 
+                    mutant_id = match.group(1)
+                    print(f"Found surviving mutant in line: {mutant_id}")
+                    mutdetails = self.get_mutant_details(mutant_id)
+                    line_diff = MutationAgent.parse_diff(mutdetails)
+                    file_name, line_number = MutationAgent.extract_location(mutdetails)
+                    mutations.append({
+                        "mutant_id": mutant_id,
+                        "original": line_diff["original"],
+                        "mutated": line_diff["mutated"],
+                        "file_name": file_name,
+                        "line_number": line_number,
+                        "status": "SURVIVED"
+                    })
+                # if match:
+                #     mutant_id = int(match.group(1))
+        return mutations
 
 # ══════════════════════════════════════════════════════════════
 # AGENT 3 — ReviewAgent  (AI-powered)
@@ -125,7 +178,7 @@ class ReviewAgent:
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY not set.")
 
-    def run(self, surviving_ids: list[int], mutation_agent: MutationAgent) -> None:
+    def run(self, surviving_ids: list[dict], mutation_agent: MutationAgent) -> None:
         _banner("Agent 3 · ReviewAgent", "🤖", "Generating kill-tests with Claude AI…")
 
         if not surviving_ids:
@@ -134,7 +187,8 @@ class ReviewAgent:
 
         new_tests: list[str] = []
 
-        for mid in surviving_ids:
+        for mutation in surviving_ids:
+            mid = mutation["mutant_id"]
             diff = mutation_agent.get_diff(mid)
             print(f"\n── Mutant #{mid} ──\n{diff}")
             code = self._ask_claude(mid, diff)
@@ -242,7 +296,7 @@ class KillVerifierAgent:
         )
         print(res.stdout)
 
-        surviving = MutationAgent._parse_surviving(res.stdout)
+        surviving = MutationAgent(self.root)._parse_surviving(res.stdout)
         if not surviving:
             print("ALL mutants killed — your test suite is solid!\n")
             return True
