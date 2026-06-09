@@ -1,0 +1,13 @@
+# Mutation Platform Configuration YAML
+core_service:
+  host: "127.0.0.1"
+  port: 8000
+  url: "http://127.0.0.1:8000"
+
+grafana:
+  url: "http://localhost:3000"
+
+workspace:
+  default_source_file: "agent/hello.py"
+  default_test_file: "agent/test_hello.py"
+  test_runner: "pytest"

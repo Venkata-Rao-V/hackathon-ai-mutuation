@@ -1,3 +1,12 @@
 requests==2.32.3
 mutmut
 pytest
+fastapi>=0.111.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+openai>=1.30.0
+python-multipart
+# Pluggable telemetry (OpenTelemetry packages)
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0

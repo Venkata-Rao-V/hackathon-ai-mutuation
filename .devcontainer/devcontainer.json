@@ -1,0 +1,37 @@
+{
+  "name": "Mutation Testing Dev Environment",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true
+    },
+    "ghcr.io/devcontainers/features/node:2": "20",
+    "ghcr.io/devcontainers/features/python:1": "3.11",
+    "ghcr.io/devcontainers/features/cpp:0": "latest"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-azuretools.vscode-docker",
+        "ms-vscode.cpptools"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "mutationTesting.coreServiceUrl": "http://localhost:8000",
+        "mutationTesting.aiProvider": "mock",
+        "mutationTesting.enableTelemetry": true
+      }
+    }
+  },
+
+  "onCreateCommand": "pip install -r requirements.txt",
+  "postCreateCommand": "python agent/services/core_mutation_service.py --host 0.0.0.0 --port 8000 &",
+  "forwardPorts": [8000, 3000, 9090]
+}

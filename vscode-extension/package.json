@@ -1,0 +1,204 @@
+{
+  "name": "ai-mutation-testing",
+  "displayName": "AI Mutation Tester",
+  "description": "Visual Studio Code integration for AI-powered mutation testing, sandbox execution, and test synthesis.",
+  "version": "1.0.0",
+  "publisher": "hackathon-ai",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:mutation-explorer",
+    "onCommand:mutation.runBaseline",
+    "onCommand:mutation.generate",
+    "onCommand:mutation.executeRuns"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mutation-testing-container",
+          "title": "Mutation Testing",
+          "icon": "$(beaker)"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "mutation-explorer",
+        "contents": "To get started with AI Mutation Testing:\n\n1. Establish baseline health:\n[🧪 Run Baseline Tests](command:mutation.runBaseline)\n\n2. Scan your active editor and search mutation nominees:\n[🔍 Scan & Generate Mutants](command:mutation.generate)\n\n3. Run mutation testing against sandboxed execution targets:\n[🧬 Execute Mutation Run](command:mutation.executeRuns)\n\n4. Inspect live metrics & Grafana telemetry:\n[📊 Open Live Observability Dashboard](command:mutation.openDashboard)"
+      }
+    ],
+    "views": {
+      "mutation-testing-container": [
+        {
+          "id": "mutation-explorer",
+          "name": "Mutation Explorer",
+          "type": "tree"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "mutation.runBaseline",
+          "when": "view == mutation-explorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mutation.generate",
+          "when": "view == mutation-explorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mutation.executeRuns",
+          "when": "view == mutation-explorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "mutation.openDashboard",
+          "when": "view == mutation-explorer",
+          "group": "navigation@4"
+        },
+        {
+          "command": "mutation.clearData",
+          "when": "view == mutation-explorer",
+          "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "mutation.runBaseline",
+          "when": "view == mutation-explorer && viewItem == baseline_category",
+          "group": "inline"
+        },
+        {
+          "command": "mutation.generate",
+          "when": "view == mutation-explorer && (viewItem == scan_category || viewItem == file_parent_category)",
+          "group": "inline"
+        },
+        {
+          "command": "mutation.executeRuns",
+          "when": "view == mutation-explorer && viewItem == run_category",
+          "group": "inline"
+        },
+        {
+          "command": "mutation.accept",
+          "when": "view == mutation-explorer && viewItem == mutantItem",
+          "group": "inline@1"
+        },
+        {
+          "command": "mutation.reject",
+          "when": "view == mutation-explorer && viewItem == mutantItem",
+          "group": "inline@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "mutation.acceptActiveDiff",
+          "when": "isInDiffEditor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mutation.rejectActiveDiff",
+          "when": "isInDiffEditor",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "mutation.acceptActiveDiff",
+        "title": "Accept Mutant",
+        "icon": "$(check)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.rejectActiveDiff",
+        "title": "Reject Mutant",
+        "icon": "$(close)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.clearData",
+        "title": "Clear Mutation Data",
+        "icon": "$(trash)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.accept",
+        "title": "Accept Mutation Candidate",
+        "icon": "$(check)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.reject",
+        "title": "Exclude/Reject Mutation Candidate",
+        "icon": "$(close)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.runBaseline",
+        "title": "Run Baseline Tests",
+        "icon": "$(beaker)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.generate",
+        "title": "Scan & Generate Mutants",
+        "icon": "$(sparkle)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.executeRuns",
+        "title": "Execute Mutation Run",
+        "icon": "$(play)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.showDiff",
+        "title": "🧬 Mutation: Propose Diff Details"
+      },
+      {
+        "command": "mutation.proposeKillTest",
+        "title": "🧬 Mutation: Propose Test to Kill Survivor"
+      },
+      {
+        "command": "mutation.openDashboard",
+        "title": "Open Live Observability Dashboard",
+        "icon": "$(graph)",
+        "category": "Mutation Testing"
+      }
+    ],
+    "configuration": {
+      "title": "AI Mutation testing options",
+      "properties": {
+        "mutationTesting.coreServiceUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "The URL of the local FastAPI core engine backend"
+        },
+        "mutationTesting.aiProvider": {
+          "type": "string",
+          "enum": ["openai", "ollama", "mock"],
+          "default": "mock",
+          "description": "AI provider service node"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
