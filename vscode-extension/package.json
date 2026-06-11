@@ -68,6 +68,11 @@
           "command": "mutation.clearData",
           "when": "view == mutation-explorer",
           "group": "navigation@5"
+        },
+        {
+          "command": "mutation.exportBaselineHtml",
+          "when": "view == mutation-explorer",
+          "group": "navigation@6"
         }
       ],
       "view/item/context": [
@@ -139,6 +144,12 @@
         "command": "mutation.reject",
         "title": "Exclude/Reject Mutation Candidate",
         "icon": "$(close)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.exportBaselineHtml",
+        "title": "Export Baseline Results as HTML",
+        "icon": "$(export)",
         "category": "Mutation Testing"
       },
       {
