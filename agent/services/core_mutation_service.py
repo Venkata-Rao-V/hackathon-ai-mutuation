@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 import uvicorn
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 # Local modules
@@ -631,7 +632,10 @@ def metrics():
         "# TYPE sandbox_tests_run_total counter",
         f"sandbox_tests_run_total {sandbox_total}"
     ]
-    return "\n".join(lines)
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 # ══════════════════════════════════════════════════════════════
