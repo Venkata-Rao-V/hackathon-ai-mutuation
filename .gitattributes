@@ -1,0 +1,21 @@
+# Ensure shell scripts always use LF line endings in the repository and
+# when checked out on Windows — prevents CRLF-related "invalid option" errors
+# when the container runs them with bash.
+*.sh        text eol=lf
+
+# Keep all other text files normalised to LF in the repo
+*           text=auto
+*.md        text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.py        text eol=lf
+*.ts        text eol=lf
+*.cpp       text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+
+# Binary files – no line-ending conversion
+*.vsix      binary
+*.png       binary
+*.jpg       binary

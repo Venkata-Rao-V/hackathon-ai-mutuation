@@ -40,16 +40,16 @@
   // ── Lifecycle hooks ──────────────────────────────────────────
 
   // Runs on EVERY container start:
+  //   0. Strips Windows CRLF line-endings from all .sh scripts (safe no-op on LF files).
   //   1. (Re)builds the extension .vsix – uses Dockerfile node_modules cache
   //      so it's fast; falls back to npm ci if cache is missing.
   //   2. Starts the FastAPI core mutation service on port 8000.
-  "postStartCommand": "bash /workspace/.devcontainer/build-extension.sh && bash /workspace/.devcontainer/start-core-service.sh",
+  "postStartCommand": "find /workspace/.devcontainer -name '*.sh' -exec sed -i 's/\r$//' {} + && bash /workspace/.devcontainer/build-extension.sh && bash /workspace/.devcontainer/start-core-service.sh",
 
   // Runs every time VS Code attaches to the container:
-  //   • Waits (up to 120 s) for the .vsix produced by postStartCommand,
-  //     then installs it into VS Code — mutation commands are available
-  //     as soon as this completes.
-  "postAttachCommand": "bash /workspace/.devcontainer/install-extension.sh",
+  //   • Strips CRLF (defensive – postStartCommand may still be running on first attach),
+  //     waits for the .vsix, then installs it into VS Code.
+  "postAttachCommand": "sed -i 's/\r$//' /workspace/.devcontainer/install-extension.sh && bash /workspace/.devcontainer/install-extension.sh",
 
   // ── Environment ────────────────────────────────────────────
 
