@@ -2,54 +2,34 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # install-extension.sh
 # Invoked by devcontainer postAttachCommand (runs every time VS Code attaches).
-# Waits for the .vsix produced by build-extension.sh (which runs concurrently
-# in postStartCommand) and installs it into the running VS Code Server instance.
+#
+# Strategy: bypass 'code --install-extension' entirely.
+# That CLI requires a local desktop VS Code installation and prints
+# "code or code-insiders is not installed" when run inside a container.
+# Instead, extract the .vsix (which is a ZIP archive) directly into the
+# VS Code Server extensions directory — no CLI, no IPC socket needed.
 # ─────────────────────────────────────────────────────────────────────────────
-# Note: deliberately NOT using 'set -o pipefail' here — the 'code' CLI returns
-# exit code 2 ("NoServer") when VS Code Server is still initialising; we handle
-# that explicitly with a retry loop below.
 set -eu
 
 VSIX="/workspace/vscode-extension/ai-mutation-testing.vsix"
 BUILD_TIMEOUT=120   # seconds to wait for build-extension.sh to produce .vsix
-INSTALL_RETRIES=10  # attempts to run 'code --install-extension'
-RETRY_DELAY=5       # seconds between install attempts
+
+# Extension identity (must match package.json publisher / name / version)
+PUBLISHER="hackathon-ai"
+EXT_NAME="ai-mutation-testing"
+VERSION="1.0.0"
+EXT_ID="${PUBLISHER}.${EXT_NAME}-${VERSION}"
 
 echo "──────────────────────────────────────────────────"
 echo "▶ Installing AI Mutation Testing VS Code extension"
 echo "──────────────────────────────────────────────────"
-
-# ── Locate the 'code' CLI ────────────────────────────────────────────────────
-# VS Code Server injects 'code' into PATH for interactive shells but not always
-# for non-interactive lifecycle hooks.  Search well-known locations as a fallback.
-if ! command -v code &>/dev/null; then
-  for candidate in \
-      /usr/local/bin/code \
-      /usr/bin/code \
-      /vscode/bin/remote-cli/code \
-      /home/vscode/.vscode-server/bin/*/bin/code; do
-    if [ -x "${candidate}" ]; then
-      export PATH="$(dirname "${candidate}"):${PATH}"
-      break
-    fi
-  done
-fi
-
-if ! command -v code &>/dev/null; then
-  echo "⚠️  'code' CLI not found — extension will not be auto-installed."
-  echo "   Once inside the container terminal run:"
-  echo "   code --install-extension ${VSIX} --force"
-  exit 0   # non-fatal: don't block the devcontainer from opening
-fi
 
 # ── Wait for build-extension.sh to produce the .vsix ────────────────────────
 if [ ! -f "${VSIX}" ]; then
   echo "  Extension build in progress — waiting (up to ${BUILD_TIMEOUT}s)..."
   elapsed=0
   while [ "${elapsed}" -lt "${BUILD_TIMEOUT}" ]; do
-    if [ -f "${VSIX}" ]; then
-      break
-    fi
+    if [ -f "${VSIX}" ]; then break; fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
@@ -59,36 +39,56 @@ if [ ! -f "${VSIX}" ]; then
   echo ""
   echo "⚠️  Timed out after ${BUILD_TIMEOUT}s waiting for ${VSIX}."
   echo "   In the container terminal run:"
-  echo "   bash /workspace/.devcontainer/build-extension.sh"
-  echo "   code --install-extension ${VSIX} --force"
-  exit 0   # non-fatal
+  echo "     bash /workspace/.devcontainer/build-extension.sh"
+  exit 0   # non-fatal: don't block the devcontainer from opening
 fi
 
-# ── Install with retry (handles VS Code Server startup delay) ────────────────
-# The 'code' CLI returns exit code 2 ("NoServer") when the server hasn't
-# finished initialising.  Retrying resolves this within a few seconds.
-echo "  Installing ${VSIX}..."
-installed=0
-for attempt in $(seq 1 "${INSTALL_RETRIES}"); do
-  if code --install-extension "${VSIX}" --force 2>&1; then
-    installed=1
-    break
+# ── Locate VS Code Server extensions directory ───────────────────────────────
+# VSCODE_AGENT_FOLDER is injected by VS Code Server when it starts the shell.
+# Fall back to the canonical ~/.vscode-server path.
+if [ -n "${VSCODE_AGENT_FOLDER:-}" ]; then
+  EXT_INSTALL_DIR="${VSCODE_AGENT_FOLDER}/extensions"
+else
+  # Search under HOME for an existing vscode-server extensions directory;
+  # create the default path if none found.
+  EXT_INSTALL_DIR=$(find "${HOME}" -maxdepth 5 \
+    -type d -name "extensions" \
+    -path "*vscode-server*" 2>/dev/null | head -1)
+  if [ -z "${EXT_INSTALL_DIR}" ]; then
+    EXT_INSTALL_DIR="${HOME}/.vscode-server/extensions"
   fi
-  rc=$?
-  echo "  Attempt ${attempt}/${INSTALL_RETRIES} failed (exit ${rc}) — retrying in ${RETRY_DELAY}s..."
-  sleep "${RETRY_DELAY}"
-done
-
-if [ "${installed}" -eq 0 ]; then
-  echo ""
-  echo "⚠️  Extension install failed after ${INSTALL_RETRIES} attempts."
-  echo "   In the container terminal run:"
-  echo "   code --install-extension ${VSIX} --force"
-  exit 0   # non-fatal: container should still open
 fi
+
+mkdir -p "${EXT_INSTALL_DIR}"
+echo "  Extensions directory: ${EXT_INSTALL_DIR}"
+
+# ── Extract VSIX → extensions directory ─────────────────────────────────────
+# A .vsix is a ZIP archive whose extension content lives under extension/.
+# python3 is guaranteed to be available (installed in Dockerfile).
+WORK_DIR="/tmp/vsix-install-$$"
+mkdir -p "${WORK_DIR}"
+
+echo "  Extracting ${VSIX}..."
+python3 - "${VSIX}" "${WORK_DIR}" <<'PYEOF'
+import sys, zipfile
+vsix_path, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(vsix_path) as z:
+    members = [m for m in z.namelist() if m.startswith("extension/")]
+    z.extractall(dest, members)
+PYEOF
+
+TARGET="${EXT_INSTALL_DIR}/${EXT_ID}"
+rm -rf "${TARGET}"
+mv "${WORK_DIR}/extension" "${TARGET}"
+rm -rf "${WORK_DIR}"
 
 echo ""
-echo "✅ Extension installed.  Available commands:"
+echo "✅ Extension installed to:"
+echo "   ${TARGET}"
+echo ""
+echo "   Reload VS Code to activate: Ctrl+Shift+P → Developer: Reload Window"
+echo ""
+echo "   Available commands:"
 echo "   • Mutation: Run Baseline Tests"
 echo "   • Mutation: Scan & Generate Mutants"
 echo "   • Mutation: Execute Mutation Run"
