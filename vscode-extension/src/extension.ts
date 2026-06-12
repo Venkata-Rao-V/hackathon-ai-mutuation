@@ -178,7 +178,13 @@ export function activate(context: vscode.ExtensionContext) {
     const aiProvider = vscode.workspace.getConfiguration('mutationTesting').get<string>('aiProvider', 'mock');
 
     let targetFiles: string[] = [];
-    let selectedOperators: string[] = ["arithmetic", "conditional_boundary", "logical"];
+    let selectedOperators: string[] = [
+      "relational_operator_replacement",
+      "arithmetic_substitution",
+      "boundary_value_tweak",
+      "boolean_inversion",
+      "return_value_stripping"
+    ];
 
     if (item && item.typeKey && item.typeKey.startsWith('file_child:')) {
       targetFiles = [item.typeKey.substring(11)];
@@ -227,9 +233,11 @@ export function activate(context: vscode.ExtensionContext) {
 
       // Present interactive list selector of custom mutation operators to parse
       const operatorOptions = [
-        { label: "Arithmetic Operators", description: "Swap mathematical operators (+ - * /)", value: "arithmetic", picked: true },
-        { label: "Conditional Boundaries", description: "Invert relational and comparative operator limits (< <= >= > == !=)", value: "conditional_boundary", picked: true },
-        { label: "Logical Connectives", description: "Invert boolean junctions (and or)", value: "logical", picked: true }
+        { label: "Relational Operator Replacement", description: "Swap relational operators (< <= >= > == !=)", value: "relational_operator_replacement", picked: true },
+        { label: "Arithmetic Substitution", description: "Swap arithmetic operators (+ - * /)", value: "arithmetic_substitution", picked: true },
+        { label: "Boundary Value Tweaks", description: "Adjust numeric boundary literals (e.g. 10 -> 11)", value: "boundary_value_tweak", picked: true },
+        { label: "Boolean Inversion", description: "Invert logical connectors/literals (and-or, true-false, not)", value: "boolean_inversion", picked: true },
+        { label: "Return Value Stripping", description: "Strip or neutralize explicit return expressions", value: "return_value_stripping", picked: true }
       ];
 
       const chosenOps = await vscode.window.showQuickPick(operatorOptions, {

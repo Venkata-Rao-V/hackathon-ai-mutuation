@@ -135,7 +135,13 @@ class BaselineRequest(BaseModel):
 class MutationGenerateRequest(BaseModel):
     workspaceDir: str
     targetFiles: List[str]
-    operators: List[str] = ["arithmetic", "conditional_boundary", "logical"]
+    operators: List[str] = [
+        "relational_operator_replacement",
+        "arithmetic_substitution",
+        "boundary_value_tweak",
+        "boolean_inversion",
+        "return_value_stripping"
+    ]
     aiEngineProvider: Optional[str] = None
     aiApiKey: Optional[str] = None
 
@@ -276,6 +282,13 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
 def generate_mutations(projectId: str, payload: MutationGenerateRequest):
     """Scan and generate logical AST mutation candidates."""
     all_mutants = []
+    requested_ops = set(payload.operators or [])
+    legacy_aliases = {
+        "arithmetic": "arithmetic_substitution",
+        "conditional_boundary": "relational_operator_replacement",
+        "logical": "boolean_inversion",
+    }
+    requested_ops_normalized = {legacy_aliases.get(op, op) for op in requested_ops}
 
     for file_rel in payload.targetFiles:
         # Resolve target files cleanly to handle potential nested or absolute paths on Windows
@@ -298,6 +311,11 @@ def generate_mutations(projectId: str, payload: MutationGenerateRequest):
 
         adapter = get_adapter_for_file(full_path)
         file_candidates = adapter.parse_mutations(file_rel, content)
+        if requested_ops_normalized:
+            file_candidates = [
+                m for m in file_candidates
+                if m.get("operator_type") in requested_ops_normalized
+            ]
         all_mutants.extend(file_candidates)
 
     # Apply AI Intelligence selection weighting and prioritization

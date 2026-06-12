@@ -6,6 +6,7 @@ and applying syntactic mutations.
 """
 
 import ast
+import re
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
@@ -70,7 +71,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "file_path": self.file_path,
                 "line_number": node.lineno,
                 "col_offset": node.col_offset,
-                "operator_type": "arithmetic",
+                "operator_type": "arithmetic_substitution",
                 "original_code": orig_str,
                 "mutated_value": mut_op_name,
                 "explanation": f"Swap arithmetic '{orig_str}' with '{mut_op_str}'"
@@ -103,7 +104,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                     "file_path": self.file_path,
                     "line_number": node.lineno,
                     "col_offset": node.col_offset,
-                    "operator_type": "conditional_boundary",
+                    "operator_type": "relational_operator_replacement",
                     "original_code": orig_str,
                     "mutated_value": mut_name,
                     "explanation": f"Swap comparison boundary '{orig_str}' with '{mut_str}'"
@@ -119,7 +120,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "file_path": self.file_path,
                 "line_number": node.lineno,
                 "col_offset": node.col_offset,
-                "operator_type": "logical",
+                "operator_type": "boolean_inversion",
                 "original_code": "and",
                 "mutated_value": "Or",
                 "explanation": "Swap logical connective 'and' with 'or'"
@@ -130,10 +131,67 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "file_path": self.file_path,
                 "line_number": node.lineno,
                 "col_offset": node.col_offset,
-                "operator_type": "logical",
+                "operator_type": "boolean_inversion",
                 "original_code": "or",
                 "mutated_value": "And",
                 "explanation": "Swap logical connective 'or' with 'and'"
+            })
+        self.generic_visit(node)
+
+    def visit_UnaryOp(self, node: ast.UnaryOp):
+        """Handle unary boolean inversion by removing explicit 'not'."""
+        if isinstance(node.op, ast.Not):
+            self.candidates.append({
+                "mutant_id": self._next_id(),
+                "file_path": self.file_path,
+                "line_number": node.lineno,
+                "col_offset": node.col_offset,
+                "operator_type": "boolean_inversion",
+                "original_code": "not",
+                "mutated_value": "RemoveNot",
+                "explanation": "Remove unary logical negation 'not'"
+            })
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant):
+        """Handle boundary tweaks (ints) and boolean literal inversion."""
+        if isinstance(node.value, bool):
+            self.candidates.append({
+                "mutant_id": self._next_id(),
+                "file_path": self.file_path,
+                "line_number": node.lineno,
+                "col_offset": node.col_offset,
+                "operator_type": "boolean_inversion",
+                "original_code": str(node.value),
+                "mutated_value": "False" if node.value else "True",
+                "explanation": "Invert boolean literal value"
+            })
+        elif isinstance(node.value, int):
+            tweaked = node.value + 1
+            self.candidates.append({
+                "mutant_id": self._next_id(),
+                "file_path": self.file_path,
+                "line_number": node.lineno,
+                "col_offset": node.col_offset,
+                "operator_type": "boundary_value_tweak",
+                "original_code": str(node.value),
+                "mutated_value": str(tweaked),
+                "explanation": f"Adjust integer boundary from {node.value} to {tweaked}"
+            })
+        self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return):
+        """Handle stripping concrete return values."""
+        if node.value is not None:
+            self.candidates.append({
+                "mutant_id": self._next_id(),
+                "file_path": self.file_path,
+                "line_number": node.lineno,
+                "col_offset": node.col_offset,
+                "operator_type": "return_value_stripping",
+                "original_code": "return",
+                "mutated_value": "StripReturnValue",
+                "explanation": "Strip return expression to default None"
             })
         self.generic_visit(node)
 
@@ -154,7 +212,7 @@ class PythonASTMutationModifier(ast.NodeTransformer):
             op_classes = {
                 "sub": ast.Sub(),
                 "add": ast.Add(),
-                "mult": ast.With(),
+                "mult": ast.Mult(),
                 "div": ast.Div(),
             }
             if self.mutated_value in op_classes:
@@ -186,6 +244,40 @@ class PythonASTMutationModifier(ast.NodeTransformer):
                 self.applied = True
             elif self.mutated_value == "And":
                 node.op = ast.And()
+                self.applied = True
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp):
+        self.generic_visit(node)
+        if node.lineno == self.target_line and node.col_offset == self.target_col:
+            if self.mutated_value == "RemoveNot" and isinstance(node.op, ast.Not):
+                self.applied = True
+                return node.operand
+        return node
+
+    def visit_Constant(self, node: ast.Constant):
+        self.generic_visit(node)
+        if node.lineno == self.target_line and node.col_offset == self.target_col:
+            if isinstance(node.value, bool):
+                if self.mutated_value == "True":
+                    node.value = True
+                    self.applied = True
+                elif self.mutated_value == "False":
+                    node.value = False
+                    self.applied = True
+            elif isinstance(node.value, int):
+                try:
+                    node.value = int(self.mutated_value)
+                    self.applied = True
+                except ValueError:
+                    pass
+        return node
+
+    def visit_Return(self, node: ast.Return):
+        self.generic_visit(node)
+        if node.lineno == self.target_line and node.col_offset == self.target_col:
+            if self.mutated_value == "StripReturnValue":
+                node.value = None
                 self.applied = True
         return node
 
@@ -296,12 +388,12 @@ class CppASTAdapter(BaseASTAdapter):
 
                 if double_op in comparison_transitions:
                     matched_op = double_op
-                    op_type = "conditional_boundary"
+                    op_type = "relational_operator_replacement"
                     mut_name, mut_str = comparison_transitions[double_op]
                     idx += 2
                 elif double_op in logical_transitions:
                     matched_op = double_op
-                    op_type = "logical"
+                    op_type = "boolean_inversion"
                     mut_name, mut_str = logical_transitions[double_op]
                     idx += 2
                 elif single_op in comparison_transitions:
@@ -313,7 +405,7 @@ class CppASTAdapter(BaseASTAdapter):
                         idx += 1
                         continue
                     matched_op = single_op
-                    op_type = "conditional_boundary"
+                    op_type = "relational_operator_replacement"
                     mut_name, mut_str = comparison_transitions[single_op]
                     idx += 1
                 elif single_op in arithmetic_transitions:
@@ -325,7 +417,7 @@ class CppASTAdapter(BaseASTAdapter):
                         idx += 1
                         continue
                     matched_op = single_op
-                    op_type = "arithmetic"
+                    op_type = "arithmetic_substitution"
                     mut_name, mut_str = arithmetic_transitions[single_op]
                     idx += 1
                 else:
@@ -344,6 +436,59 @@ class CppASTAdapter(BaseASTAdapter):
                         "mutated_value": mut_name,
                         "explanation": f"Swap C++ '{matched_op}' with '{mut_str}'"
                     })
+
+            # Boolean literal inversion
+            for match in re.finditer(r"\b(true|false)\b", line):
+                token = match.group(1)
+                mutant_idx += 1
+                candidates.append({
+                    "mutant_id": f"mut_cpp_{mutant_idx:03d}",
+                    "file_path": file_path,
+                    "line_number": line_no,
+                    "col_offset": match.start(1),
+                    "operator_type": "boolean_inversion",
+                    "original_code": token,
+                    "mutated_value": "false" if token == "true" else "true",
+                    "explanation": f"Invert boolean literal '{token}'"
+                })
+
+            # Boundary value tweaks on integer literals
+            for match in re.finditer(r"\b\d+\b", line):
+                token = match.group(0)
+                try:
+                    tweaked = str(int(token) + 1)
+                except ValueError:
+                    continue
+                mutant_idx += 1
+                candidates.append({
+                    "mutant_id": f"mut_cpp_{mutant_idx:03d}",
+                    "file_path": file_path,
+                    "line_number": line_no,
+                    "col_offset": match.start(0),
+                    "operator_type": "boundary_value_tweak",
+                    "original_code": token,
+                    "mutated_value": tweaked,
+                    "explanation": f"Adjust numeric boundary from {token} to {tweaked}"
+                })
+
+            # Return value stripping for non-string return expressions
+            ret_match = re.search(r"\breturn\s+([^;]+);", line)
+            if ret_match:
+                expr = ret_match.group(1).strip()
+                if expr and '"' not in expr and "'" not in expr:
+                    expr_col = line.find(expr)
+                    if expr_col >= 0:
+                        mutant_idx += 1
+                        candidates.append({
+                            "mutant_id": f"mut_cpp_{mutant_idx:03d}",
+                            "file_path": file_path,
+                            "line_number": line_no,
+                            "col_offset": expr_col,
+                            "operator_type": "return_value_stripping",
+                            "original_code": expr,
+                            "mutated_value": "0",
+                            "explanation": "Strip return expression to default scalar value"
+                        })
 
         return candidates
 
@@ -368,7 +513,12 @@ class CppASTAdapter(BaseASTAdapter):
             return file_content
 
         target_line = lines[line_idx]
-        if col_offset >= 0 and col_offset + len(orig) <= len(target_line) and target_line[col_offset : col_offset + len(orig)] == orig:
+        if match.get("operator_type") == "return_value_stripping":
+            if col_offset >= 0 and col_offset + len(orig) <= len(target_line):
+                lines[line_idx] = target_line[:col_offset] + mut_char + target_line[col_offset + len(orig):]
+            else:
+                lines[line_idx] = re.sub(r"\breturn\s+[^;]+;", f"return {mut_char};", target_line, count=1)
+        elif col_offset >= 0 and col_offset + len(orig) <= len(target_line) and target_line[col_offset : col_offset + len(orig)] == orig:
             lines[line_idx] = target_line[:col_offset] + mut_char + target_line[col_offset + len(orig):]
         else:
             # Fallback inline string swap
