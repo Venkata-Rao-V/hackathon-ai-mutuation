@@ -73,6 +73,11 @@
           "command": "mutation.exportBaselineHtml",
           "when": "view == mutation-explorer",
           "group": "navigation@6"
+        },
+        {
+          "command": "mutation.generateReport",
+          "when": "view == mutation-explorer",
+          "group": "navigation@7"
         }
       ],
       "view/item/context": [
@@ -182,6 +187,12 @@
         "command": "mutation.openDashboard",
         "title": "Open Live Observability Dashboard",
         "icon": "$(graph)",
+        "category": "Mutation Testing"
+      },
+      {
+        "command": "mutation.generateReport",
+        "title": "Generate Mutation Report",
+        "icon": "$(report)",
         "category": "Mutation Testing"
       }
     ],
