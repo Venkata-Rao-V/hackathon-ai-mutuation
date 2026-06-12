@@ -1075,6 +1075,24 @@ function escapeMarkdownCell(value: any): string {
     .replace(/\r?\n/g, ' ');
 }
 
+function severityForMutant(mutant: any): string {
+  const explicit = (mutant?.severity || '').toString().trim().toUpperCase();
+  if (explicit) {
+    return explicit;
+  }
+  const op = (mutant?.operator_type || '').toString();
+  if (op === 'relational_operator_replacement' || op === 'boolean_inversion' || op === 'return_value_stripping') {
+    return 'HIGH';
+  }
+  if (op === 'boundary_value_tweak') {
+    return 'MEDIUM';
+  }
+  if (op === 'arithmetic_substitution') {
+    return 'LOW';
+  }
+  return 'UNKNOWN';
+}
+
 function generateMutationMarkdownReport(data: {
   baselineTests: any[];
   baselineDurationMs?: number;
@@ -1102,6 +1120,9 @@ function generateMutationMarkdownReport(data: {
   const survivedMutants = runResults.filter(r => r.status === 'SURVIVED').length;
   const mutationScore = runResults.length > 0 ? ((killedMutants / runResults.length) * 100).toFixed(1) : '0.0';
 
+  const severityAgg = new Map<string, { total: number; killed: number; survived: number; pending: number }>();
+  const severityOrder = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+
   const langAgg = new Map<string, { total: number; accepted: number; rejected: number; killed: number; survived: number; pending: number }>();
 
   // Seed language buckets from selected sources so C appears even when no mutants were generated for a file.
@@ -1118,6 +1139,7 @@ function generateMutationMarkdownReport(data: {
   for (const m of mutants) {
     const sourcePath = (m.file_path || m.filePath || 'unknown').toString();
     const lang = languageFromPath(sourcePath);
+    const severity = severityForMutant(m);
     const current = langAgg.get(lang) || { total: 0, accepted: 0, rejected: 0, killed: 0, survived: 0, pending: 0 };
     current.total += 1;
     if (m.accepted === false) {
@@ -1135,6 +1157,17 @@ function generateMutationMarkdownReport(data: {
       current.pending += 1;
     }
     langAgg.set(lang, current);
+
+    const sevCurrent = severityAgg.get(severity) || { total: 0, killed: 0, survived: 0, pending: 0 };
+    sevCurrent.total += 1;
+    if (runStatus === 'KILLED') {
+      sevCurrent.killed += 1;
+    } else if (runStatus === 'SURVIVED') {
+      sevCurrent.survived += 1;
+    } else {
+      sevCurrent.pending += 1;
+    }
+    severityAgg.set(severity, sevCurrent);
 
     sourceByMutant.set(m.mutant_id, sourcePath);
     const sourceCurrent = sourceAgg.get(sourcePath) || { language: lang, mutants: 0, killed: 0, survived: 0, pending: 0 };
@@ -1179,7 +1212,8 @@ function generateMutationMarkdownReport(data: {
     const runStatus = runStatusByMutant.get(m.mutant_id) || m.status || 'PENDING';
     const accepted = m.accepted === false ? 'REJECTED' : 'ACCEPTED';
     const file = m.file_path || 'unknown';
-    return `| ${idx + 1} | ${m.mutant_id || '-'} | ${file} | ${m.line_number || '-'} | ${m.operator_type || '-'} | ${m.original_code || '-'} | ${m.mutated_value || '-'} | ${accepted} | ${runStatus} |`;
+    const severity = severityForMutant(m);
+    return `| ${idx + 1} | ${m.mutant_id || '-'} | ${file} | ${m.line_number || '-'} | ${m.operator_type || '-'} | ${severity} | ${m.original_code || '-'} | ${m.mutated_value || '-'} | ${accepted} | ${runStatus} |`;
   }).join('\n');
 
   const languageRows = Array.from(langAgg.entries()).map(([lang, v]) => {
@@ -1189,6 +1223,14 @@ function generateMutationMarkdownReport(data: {
   const sourceRows = Array.from(sourceAgg.entries()).map(([src, v]) => {
     return `| ${src} | ${v.language} | ${v.mutants} | ${v.killed} | ${v.survived} | ${v.pending} |`;
   }).join('\n');
+
+  const severityRows = severityOrder
+    .filter(severity => severityAgg.has(severity))
+    .map(severity => {
+      const v = severityAgg.get(severity)!;
+      return `| ${severity} | ${v.total} | ${v.killed} | ${v.survived} | ${v.pending} |`;
+    })
+    .join('\n');
 
   const testRows = Array.from(testCaseAgg.entries()).map(([name, v]) => {
     return `| ${escapeMarkdownCell(name)} | ${v.baselinePassed} | ${v.baselineFailed} | ${v.killedMutants} |`;
@@ -1212,7 +1254,8 @@ function generateMutationMarkdownReport(data: {
       const runStatus = runStatusByMutant.get(m.mutant_id) || m.status || 'PENDING';
       const accepted = m.accepted === false ? 'REJECTED' : 'ACCEPTED';
       const file = m.file_path || m.filePath || 'unknown';
-      return `| ${idx + 1} | ${escapeMarkdownCell(m.mutant_id || '-')} | ${escapeMarkdownCell(file)} | ${m.line_number || '-'} | ${escapeMarkdownCell(m.operator_type || '-')} | ${escapeMarkdownCell(m.original_code || '-')} | ${escapeMarkdownCell(m.mutated_value || '-')} | ${accepted} | ${runStatus} |`;
+      const severity = severityForMutant(m);
+      return `| ${idx + 1} | ${escapeMarkdownCell(m.mutant_id || '-')} | ${escapeMarkdownCell(file)} | ${m.line_number || '-'} | ${escapeMarkdownCell(m.operator_type || '-')} | ${severity} | ${escapeMarkdownCell(m.original_code || '-')} | ${escapeMarkdownCell(m.mutated_value || '-')} | ${accepted} | ${runStatus} |`;
     }).join('\n');
 
     return `### ${lang}
@@ -1221,8 +1264,8 @@ function generateMutationMarkdownReport(data: {
 | --- | ---: | ---: | ---: | ---: |
 ${langSourceRows || '| N/A | 0 | 0 | 0 | 0 |'}
 
-| # | Mutant ID | File | Line | Operator Type | Original | Mutated | Selection | Final Status |
-| ---: | --- | --- | ---: | --- | --- | --- | --- | --- |
+| # | Mutant ID | File | Line | Operator Type | Severity | Original | Mutated | Selection | Final Status |
+| ---: | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
 ${langMutantRows || '| 1 | N/A | N/A | - | - | - | - | - | - |'}
 `;
   }).join('\n');
@@ -1247,6 +1290,12 @@ Generated at: ${generatedAt}
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 ${languageRows || '| N/A | 0 | 0 | 0 | 0 | 0 | 0 |'}
 
+## Severity Summary
+
+| Severity | Total Mutants | Killed | Survived | Pending |
+| --- | ---: | ---: | ---: | ---: |
+${severityRows || '| N/A | 0 | 0 | 0 | 0 |'}
+
 ## Source-wise Summary
 
 | Source File | Language | Mutants | Killed | Survived | Pending |
@@ -1265,8 +1314,8 @@ ${testRows || '| N/A | 0 | 0 | 0 |'}
 
 ## Mutant-wise Details
 
-| # | Mutant ID | File | Line | Operator Type | Original | Mutated | Selection | Final Status |
-| ---: | --- | --- | ---: | --- | --- | --- | --- | --- |
+| # | Mutant ID | File | Line | Operator Type | Severity | Original | Mutated | Selection | Final Status |
+| ---: | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
 ${mutantRows || '| 1 | N/A | N/A | - | - | - | - | - | - |'}
 `;
 }

@@ -11,6 +11,19 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
 
+SEVERITY_BY_OPERATOR = {
+    "relational_operator_replacement": "HIGH",
+    "arithmetic_substitution": "LOW",
+    "boundary_value_tweak": "MEDIUM",
+    "boolean_inversion": "HIGH",
+    "return_value_stripping": "HIGH",
+}
+
+
+def severity_for_operator(operator_type: str) -> str:
+    return SEVERITY_BY_OPERATOR.get(operator_type, "MEDIUM")
+
+
 class BaseASTAdapter(ABC):
     """Abstract Base Class for language-specific AST manipulation and mutation generation."""
 
@@ -74,6 +87,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "arithmetic_substitution",
                 "original_code": orig_str,
                 "mutated_value": mut_op_name,
+                "severity": severity_for_operator("arithmetic_substitution"),
                 "explanation": f"Swap arithmetic '{orig_str}' with '{mut_op_str}'"
             })
         self.generic_visit(node)
@@ -107,6 +121,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                     "operator_type": "relational_operator_replacement",
                     "original_code": orig_str,
                     "mutated_value": mut_name,
+                    "severity": severity_for_operator("relational_operator_replacement"),
                     "explanation": f"Swap comparison boundary '{orig_str}' with '{mut_str}'"
                 })
         self.generic_visit(node)
@@ -123,6 +138,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "boolean_inversion",
                 "original_code": "and",
                 "mutated_value": "Or",
+                "severity": severity_for_operator("boolean_inversion"),
                 "explanation": "Swap logical connective 'and' with 'or'"
             })
         elif node_class == ast.Or:
@@ -134,6 +150,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "boolean_inversion",
                 "original_code": "or",
                 "mutated_value": "And",
+                "severity": severity_for_operator("boolean_inversion"),
                 "explanation": "Swap logical connective 'or' with 'and'"
             })
         self.generic_visit(node)
@@ -149,6 +166,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "boolean_inversion",
                 "original_code": "not",
                 "mutated_value": "RemoveNot",
+                "severity": severity_for_operator("boolean_inversion"),
                 "explanation": "Remove unary logical negation 'not'"
             })
         self.generic_visit(node)
@@ -164,6 +182,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "boolean_inversion",
                 "original_code": str(node.value),
                 "mutated_value": "False" if node.value else "True",
+                "severity": severity_for_operator("boolean_inversion"),
                 "explanation": "Invert boolean literal value"
             })
         elif isinstance(node.value, int):
@@ -176,6 +195,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "boundary_value_tweak",
                 "original_code": str(node.value),
                 "mutated_value": str(tweaked),
+                "severity": severity_for_operator("boundary_value_tweak"),
                 "explanation": f"Adjust integer boundary from {node.value} to {tweaked}"
             })
         self.generic_visit(node)
@@ -191,6 +211,7 @@ class PythonASTMutationScanner(ast.NodeVisitor):
                 "operator_type": "return_value_stripping",
                 "original_code": "return",
                 "mutated_value": "StripReturnValue",
+                "severity": severity_for_operator("return_value_stripping"),
                 "explanation": "Strip return expression to default None"
             })
         self.generic_visit(node)
@@ -517,6 +538,7 @@ class CppASTAdapter(BaseASTAdapter):
                         "operator_type": op_type,
                         "original_code": matched_op,
                         "mutated_value": mut_name,
+                        "severity": severity_for_operator(op_type),
                         "explanation": f"Swap C++ '{matched_op}' with '{mut_str}'"
                     })
 
@@ -532,6 +554,7 @@ class CppASTAdapter(BaseASTAdapter):
                     "operator_type": "boolean_inversion",
                     "original_code": token,
                     "mutated_value": "false" if token == "true" else "true",
+                    "severity": severity_for_operator("boolean_inversion"),
                     "explanation": f"Invert boolean literal '{token}'"
                 })
 
@@ -551,6 +574,7 @@ class CppASTAdapter(BaseASTAdapter):
                     "operator_type": "boundary_value_tweak",
                     "original_code": token,
                     "mutated_value": tweaked,
+                    "severity": severity_for_operator("boundary_value_tweak"),
                     "explanation": f"Adjust numeric boundary from {token} to {tweaked}"
                 })
 
@@ -570,6 +594,7 @@ class CppASTAdapter(BaseASTAdapter):
                             "operator_type": "return_value_stripping",
                             "original_code": expr,
                             "mutated_value": "0",
+                            "severity": severity_for_operator("return_value_stripping"),
                             "explanation": "Strip return expression to default scalar value"
                         })
 
