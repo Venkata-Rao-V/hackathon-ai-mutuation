@@ -271,22 +271,50 @@ class CppRunnerAdapter(TestRunnerAdapter):
             with open(sandbox_target_path, "w", encoding="utf-8") as f:
                 f.write(mutated_code)
 
-        # Step 4: Locate candidate C/C++ source and test files
-        source_candidates = [
+        # Step 4: Locate source and test files derived from requested target file first
+        source_candidates: List[str] = []
+        if target_file:
+            norm_target = os.path.realpath(target_file)
+            norm_workspace = os.path.realpath(workspace_root)
+            if norm_target.lower().startswith(norm_workspace.lower()):
+                rel_target = os.path.relpath(norm_target, norm_workspace)
+                source_candidates.append(os.path.join(sandbox_dir, rel_target))
+
+        source_candidates.extend([
             os.path.join(sandbox_dir, "agent", "hello.cpp"),
             os.path.join(sandbox_dir, "hello.cpp"),
             os.path.join(sandbox_dir, "agent", "hello.c"),
             os.path.join(sandbox_dir, "hello.c"),
-        ]
-        hello_cpp = next((p for p in source_candidates if os.path.exists(p)), source_candidates[0])
+        ])
+        source_file = next((p for p in source_candidates if os.path.exists(p)), None)
+        if not source_file:
+            return {
+                "overallStatus": "SANDBOX_CRASH",
+                "killingTest": None,
+                "failureOutput": "No C/C++ source file found in sandbox for execution.",
+                "durationMs": int((time.time() - start_time) * 1000),
+            }
+
+        source_dir = os.path.dirname(source_file)
+        source_stem, source_ext = os.path.splitext(os.path.basename(source_file))
 
         test_candidates = [
+            os.path.join(source_dir, f"test_{source_stem}{source_ext}"),
+            os.path.join(source_dir, f"test_{source_stem}.c"),
+            os.path.join(source_dir, f"test_{source_stem}.cpp"),
             os.path.join(sandbox_dir, "agent", "test_hello.cpp"),
             os.path.join(sandbox_dir, "test_hello.cpp"),
             os.path.join(sandbox_dir, "agent", "test_hello.c"),
             os.path.join(sandbox_dir, "test_hello.c"),
         ]
-        test_hello_cpp = next((p for p in test_candidates if os.path.exists(p)), test_candidates[0])
+        test_file = next((p for p in test_candidates if os.path.exists(p)), None)
+        if not test_file:
+            return {
+                "overallStatus": "SANDBOX_CRASH",
+                "killingTest": None,
+                "failureOutput": f"No C/C++ test file found for source: {os.path.basename(source_file)}",
+                "durationMs": int((time.time() - start_time) * 1000),
+            }
 
         # Binary compilation path matching Windows / Unix
         bin_ext = ".exe" if sys.platform == "win32" else ""
@@ -294,15 +322,15 @@ class CppRunnerAdapter(TestRunnerAdapter):
 
         # Step 5: Compile and run via g++
         try:
-            source_ext = os.path.splitext(hello_cpp)[1].lower()
-            test_ext = os.path.splitext(test_hello_cpp)[1].lower()
+            source_ext = os.path.splitext(source_file)[1].lower()
+            test_ext = os.path.splitext(test_file)[1].lower()
             is_pure_c = source_ext == ".c" and test_ext == ".c"
 
             # Use gcc for pure C projects, otherwise compile as C++ for mixed C/C++ tests.
             if is_pure_c:
-                compile_cmd = ["gcc", "-std=c11", hello_cpp, test_hello_cpp, "-o", out_bin]
+                compile_cmd = ["gcc", "-std=c11", source_file, test_file, "-o", out_bin]
             else:
-                compile_cmd = ["g++", "-std=c++17", hello_cpp, test_hello_cpp, "-o", out_bin]
+                compile_cmd = ["g++", "-std=c++17", source_file, test_file, "-o", out_bin]
             
             comp_result = subprocess.run(
                 compile_cmd,
@@ -344,13 +372,18 @@ class CppRunnerAdapter(TestRunnerAdapter):
             total_tests = tests_passed + tests_failed
             if total_tests == 0:
                 # Basic backup count
-                if passed:
-                    tests_passed = 8
-                    total_tests = 8
+                if is_pure_c:
+                    tests_passed = 1 if passed else 0
+                    tests_failed = 0 if passed else 1
+                    total_tests = 1
                 else:
-                    tests_passed = 7
-                    tests_failed = 1
-                    total_tests = 8
+                    if passed:
+                        tests_passed = 8
+                        total_tests = 8
+                    else:
+                        tests_passed = 7
+                        tests_failed = 1
+                        total_tests = 8
 
             tests_list = []
             for line in stdout.splitlines():
@@ -360,19 +393,24 @@ class CppRunnerAdapter(TestRunnerAdapter):
                         test_suite_fn = parts[2]
                         status_str = "PASSED" if "[       OK ]" in line else "FAILED"
                         tests_list.append({
-                            "name": f"agent/test_hello.cpp::{test_suite_fn}",
+                            "name": f"{os.path.relpath(test_file, sandbox_dir).replace(os.sep, '/') }::{test_suite_fn}",
                             "status": status_str,
                             "durationMs": 10
                         })
 
             if not tests_list:
-                tests_list = [
-                    { "name": "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", "status": "PASSED", "durationMs": 10 },
-                    { "name": "agent/test_hello.cpp::TestSayHello::RegularName", "status": "PASSED", "durationMs": 10 },
-                    { "name": "agent/test_hello.cpp::TestSayHello::EmptyString", "status": "PASSED", "durationMs": 10 },
-                    { "name": "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", "status": "PASSED", "durationMs": 10 },
-                    { "name": "agent/test_hello.cpp::TestFormalGreeting::WithTitle", "status": "PASSED", "durationMs": 10 }
-                ]
+                if is_pure_c:
+                    tests_list = [
+                        { "name": f"{os.path.relpath(test_file, sandbox_dir).replace(os.sep, '/') }::main", "status": "PASSED" if passed else "FAILED", "durationMs": 10 }
+                    ]
+                else:
+                    tests_list = [
+                        { "name": "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", "status": "PASSED", "durationMs": 10 },
+                        { "name": "agent/test_hello.cpp::TestSayHello::RegularName", "status": "PASSED", "durationMs": 10 },
+                        { "name": "agent/test_hello.cpp::TestSayHello::EmptyString", "status": "PASSED", "durationMs": 10 },
+                        { "name": "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", "status": "PASSED", "durationMs": 10 },
+                        { "name": "agent/test_hello.cpp::TestFormalGreeting::WithTitle", "status": "PASSED", "durationMs": 10 }
+                    ]
 
             killing_test = None
             if not passed:
@@ -380,6 +418,8 @@ class CppRunnerAdapter(TestRunnerAdapter):
                     if "[  FAILED  ]" in line:
                         killing_test = line.strip()
                         break
+                if not killing_test and is_pure_c:
+                    killing_test = f"{os.path.relpath(test_file, sandbox_dir).replace(os.sep, '/') }::main"
 
             duration_ms = int((time.time() - start_time) * 1000)
             return {

@@ -183,7 +183,7 @@ export function activate(context: vscode.ExtensionContext) {
       targetFiles = [item.typeKey.substring(11)];
     } else {
       // Find all source files (Python and C++) excluding tests, runner executables, and service libraries
-      const uris = await vscode.workspace.findFiles('**/*.{py,cpp,cc,hpp,h}', '**/node_modules/**');
+      const uris = await vscode.workspace.findFiles('**/*.{py,c,cpp,cc,hpp,h}', '**/node_modules/**');
       const sourceFiles = uris.map(u => vscode.workspace.asRelativePath(u)).filter(p => {
         const pLower = p.toLowerCase();
         return !pLower.includes('test_') && 
@@ -201,20 +201,20 @@ export function activate(context: vscode.ExtensionContext) {
       // Present a checkable multi-select QuickPick structure supporting mixed languages
       const fileOptions = sourceFiles.map(f => {
         const ext = path.extname(f).toLowerCase();
-        const isCpp = ['.cpp', '.cc', '.hpp', '.h'].includes(ext);
+        const isCpp = ['.c', '.cpp', '.cc', '.hpp', '.h'].includes(ext);
         const normF = f.replace(/\\/g, '/');
         const resolvedDefault = config.defaultSourceFile ? config.defaultSourceFile.replace(/\\/g, '/') : '';
         const isDefault = resolvedDefault && (normF === resolvedDefault || normF.endsWith(resolvedDefault));
         return {
           label: f,
-          picked: !!(isDefault || f.includes('hello.py') || f.includes('hello.cpp')),
-          description: isCpp ? "C++ Source File" : "Python Source File"
+          picked: !!(isDefault || f.includes('hello.py') || f.includes('hello.cpp') || f.includes('hello.c')),
+              description: isCpp ? "C/C++ Source File" : "Python Source File"
         };
       });
 
       const chosenFiles = await vscode.window.showQuickPick(fileOptions, {
         canPickMany: true,
-        placeHolder: "Select target python or C++ source files to generate mutants from",
+        placeHolder: "Select target Python or C/C++ source files to generate mutants from",
         title: "🧬 Multiple Source File Selection"
       });
 
@@ -598,9 +598,17 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const first_path = survivors[0].file_path || "";
-    const isCpp = ['.cpp', '.cc', '.hpp', '.h'].includes(path.extname(first_path).toLowerCase());
-    const resolvedTargetFile = first_path || (isCpp ? "agent/hello.cpp" : "agent/hello.py");
-    const resolvedTestFile = isCpp ? "agent/test_hello.cpp" : "agent/test_hello.py";
+    const sourceExt = path.extname(first_path).toLowerCase();
+    const isCFamily = ['.c', '.cpp', '.cc', '.hpp', '.h'].includes(sourceExt);
+    const resolvedTargetFile = first_path || (isCFamily ? "agent/hello.cpp" : "agent/hello.py");
+
+    let resolvedTestFile = "agent/test_hello.py";
+    if (isCFamily) {
+      const sourceBase = path.basename(resolvedTargetFile);
+      const sourceName = sourceBase.substring(0, sourceBase.lastIndexOf('.')) || 'hello';
+      const candidateExt = sourceExt === '.c' ? '.c' : '.cpp';
+      resolvedTestFile = `agent/test_${sourceName}${candidateExt}`;
+    }
 
     statusBarItem.text = "🧬 Requesting AI test case...";
     outputChannel.appendLine(`Invoking generative test synthesis for mutant: ${survivors[0].mutant_id}`);
