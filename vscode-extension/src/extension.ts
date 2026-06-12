@@ -986,79 +986,175 @@ export function deactivate() {}
 // Helper: Generate Baseline HTML Report
 // ══════════════════════════════════════════════════════════════
 function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: any[] = [], runResults: any[] = []): string {
-  const passed = tests.filter(t => t.status === 'PASSED').length;
-  const failed = tests.filter(t => t.status !== 'PASSED').length;
-  const total = tests.length;
-  const timestamp = new Date().toLocaleString();
+  const passed  = tests.filter(t => t.status === 'PASSED').length;
+  const failed  = tests.filter(t => t.status !== 'PASSED').length;
+  const total   = tests.length;
+  const timestamp  = new Date().toLocaleString();
+  const isoStamp   = new Date().toISOString();
   const overallStatus = failed === 0 ? 'PASSED' : 'FAILED';
-  const overallColor = failed === 0 ? '#4caf50' : '#f44336';
 
-  const totalGenerated = mutants.length;
-  const killedMutants = runResults.filter(r => r?.status === 'KILLED').length;
+  // ── Mutation analytics ───────────────────────────────────────
+  const totalGenerated  = mutants.length;
+  const killedMutants   = runResults.filter(r => r?.status === 'KILLED').length;
   const survivedMutants = runResults.filter(r => r?.status === 'SURVIVED').length;
-  const mutationScore = runResults.length > 0 ? ((killedMutants / runResults.length) * 100).toFixed(1) : '0.0';
+  const pendingMutants  = totalGenerated - killedMutants - survivedMutants;
+  const mutationScore   = runResults.length > 0
+    ? ((killedMutants / runResults.length) * 100).toFixed(1)
+    : '0.0';
+  const scoreNum = parseFloat(mutationScore);
+  const scoreColor = scoreNum >= 80 ? '#4caf50' : scoreNum >= 50 ? '#ffb74d' : '#f44336';
 
-  const runStatusByMutant = new Map<string, string>();
+  // Build run result lookup by mutant id
+  const runByMutant = new Map<string, any>();
   for (const run of runResults) {
     const mid = run?.mutantId || run?.mutant_id;
-    if (mid) {
-      runStatusByMutant.set(mid, run.status || 'PENDING');
-    }
+    if (mid) { runByMutant.set(mid, run); }
   }
 
+  // ── Severity aggregation ────────────────────────────────────
   const severityAgg = new Map<string, { total: number; killed: number; survived: number; pending: number }>();
   const severityOrder = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
   for (const m of mutants) {
-    const severity = severityForMutant(m);
-    const runStatus = runStatusByMutant.get(m?.mutant_id || m?.mutantId || '') || (m?.status || 'PENDING');
-    const current = severityAgg.get(severity) || { total: 0, killed: 0, survived: 0, pending: 0 };
-    current.total += 1;
-    if (runStatus === 'KILLED') {
-      current.killed += 1;
-    } else if (runStatus === 'SURVIVED') {
-      current.survived += 1;
-    } else {
-      current.pending += 1;
-    }
-    severityAgg.set(severity, current);
+    const sev = severityForMutant(m);
+    const run = runByMutant.get(m?.mutant_id || m?.mutantId || '');
+    const rs  = run?.status || m?.status || 'PENDING';
+    const cur = severityAgg.get(sev) || { total: 0, killed: 0, survived: 0, pending: 0 };
+    cur.total += 1;
+    if (rs === 'KILLED')   { cur.killed   += 1; }
+    else if (rs === 'SURVIVED') { cur.survived += 1; }
+    else                   { cur.pending  += 1; }
+    severityAgg.set(sev, cur);
   }
 
-  const rows = tests.map(t => {
-    const statusColor = t.status === 'PASSED' ? '#4caf50' : '#f44336';
-    const statusIcon = t.status === 'PASSED' ? '✅' : '❌';
-    const dur = t.durationMs !== undefined ? `${t.durationMs}ms` : '—';
-    return `<tr><td>${escapeHtml(t.name || '')}</td><td style="color:${statusColor};font-weight:bold;">${statusIcon} ${t.status || ''}</td><td>${dur}</td></tr>`;
+  // ── Helpers ─────────────────────────────────────────────────
+  const fmtDur = (ms: number | undefined) => ms !== undefined ? `${ms.toLocaleString()} ms` : '—';
+  const pill = (label: string, bg: string, fg = '#fff') =>
+    `<span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:${bg};color:${fg};">${label}</span>`;
+  const sevPill = (s: string) => {
+    const map: Record<string, string> = { HIGH: '#e53935', MEDIUM: '#fb8c00', LOW: '#43a047', UNKNOWN: '#757575' };
+    return pill(s, map[s] || '#757575');
+  };
+  const statusPill = (s: string) => {
+    if (s === 'KILLED')   { return pill('KILLED',   '#1b5e20', '#a5d6a7'); }
+    if (s === 'SURVIVED') { return pill('SURVIVED', '#b71c1c', '#ef9a9a'); }
+    if (s === 'PASSED')   { return pill('PASSED',   '#1b5e20', '#a5d6a7'); }
+    if (s === 'FAILED')   { return pill('FAILED',   '#b71c1c', '#ef9a9a'); }
+    return pill(s || 'PENDING', '#37474f', '#b0bec5');
+  };
+  const progressBar = (pct: number, color: string) =>
+    `<div style="background:#37474f;border-radius:4px;height:8px;width:100%;margin-top:6px;">` +
+    `<div style="background:${color};border-radius:4px;height:8px;width:${Math.min(pct,100).toFixed(1)}%;"></div></div>`;
+  const shortFile = (fp: string) => fp ? fp.split('/').pop()! : '—';
+
+  // ── Baseline test rows ───────────────────────────────────────
+  const testRows = tests.map((t, i) => {
+    const even = i % 2 === 0;
+    const dur  = fmtDur(t.durationMs);
+    return `<tr class="${even ? 'even' : ''}">
+      <td class="mono">${escapeHtml(t.name || '')}</td>
+      <td>${statusPill(t.status || 'UNKNOWN')}</td>
+      <td class="num">${dur}</td>
+    </tr>`;
   }).join('');
 
-  const durationCard = durationMs !== undefined
-    ? `<div class="card"><div class="value" style="color:#569cd6;">${durationMs}ms</div><div class="label">Duration</div></div>`
-    : '';
-
-  const mutationCards = totalGenerated > 0 || runResults.length > 0
-    ? `
-    <div class="card"><div class="value" style="color:#ffb74d;">${totalGenerated}</div><div class="label">Generated Mutants</div></div>
-    <div class="card"><div class="value" style="color:#4caf50;">${killedMutants}</div><div class="label">Killed Mutants</div></div>
-    <div class="card"><div class="value" style="color:#f44336;">${survivedMutants}</div><div class="label">Survived Mutants</div></div>
-    <div class="card"><div class="value" style="color:#03a9f4;">${mutationScore}%</div><div class="label">Mutation Score</div></div>
-    `
-    : '';
-
+  // ── Severity table rows ──────────────────────────────────────
   const severityRows = severityOrder
     .filter(sev => severityAgg.has(sev))
     .map(sev => {
-      const v = severityAgg.get(sev)!;
-      return `<tr><td>${sev}</td><td>${v.total}</td><td style="color:#4caf50;font-weight:bold;">${v.killed}</td><td style="color:#f44336;font-weight:bold;">${v.survived}</td><td>${v.pending}</td></tr>`;
-    })
-    .join('');
+      const v   = severityAgg.get(sev)!;
+      const pct = v.total > 0 ? (v.killed / v.total) * 100 : 0;
+      return `<tr>
+        <td>${sevPill(sev)}</td>
+        <td class="num">${v.total}</td>
+        <td class="num killed">${v.killed}</td>
+        <td class="num survived">${v.survived}</td>
+        <td class="num pending">${v.pending}</td>
+        <td style="min-width:120px;">${progressBar(pct, '#43a047')}<span style="font-size:.75em;opacity:.7;">${pct.toFixed(0)}% killed</span></td>
+      </tr>`;
+    }).join('');
 
-  const severitySection = severityRows
-    ? `
-  <h2 style="margin-top:24px;color:#ffb74d;">Mutation Severity Summary</h2>
-  <table>
-    <thead><tr><th>Severity</th><th>Total</th><th>Killed</th><th>Survived</th><th>Pending</th></tr></thead>
-    <tbody>${severityRows}</tbody>
-  </table>
-  `
+  // ── Mutant detail rows ───────────────────────────────────────
+  const mutantRows = mutants.map((m, i) => {
+    const run     = runByMutant.get(m?.mutant_id || m?.mutantId || '');
+    const status  = run?.status || m?.status || 'PENDING';
+    const dur     = fmtDur(run?.executionDurationMs);
+    const sev     = severityForMutant(m);
+    const even    = i % 2 === 0;
+    const killing = run?.killingTest ? `<div class="killing-test">${escapeHtml(run.killingTest)}</div>` : '';
+    return `<tr class="${even ? 'even' : ''}">
+      <td class="num dim">${i + 1}</td>
+      <td class="mono dim">${escapeHtml(m.mutant_id || '—')}</td>
+      <td class="mono">${escapeHtml(shortFile(m.file_path || m.filePath || ''))}<span class="line-num">:${m.line_number || '?'}</span></td>
+      <td><code class="op-type">${escapeHtml(m.operator_type || '—')}</code></td>
+      <td>${sevPill(sev)}</td>
+      <td><code class="orig">${escapeHtml(m.original_code || '—')}</code></td>
+      <td><code class="mut">${escapeHtml(m.mutated_value || '—')}</code></td>
+      <td>${statusPill(status)}${killing}</td>
+      <td class="num">${dur}</td>
+    </tr>`;
+  }).join('');
+
+  const hasMutants  = totalGenerated > 0 || runResults.length > 0;
+  const mutantSection = hasMutants ? `
+  <!-- ═══ MUTATION ANALYTICS ════════════════════════════════ -->
+  <section>
+    <div class="section-header">
+      <span class="section-icon">🧬</span>
+      <div>
+        <div class="section-title">Mutation Testing Analytics</div>
+        <div class="section-sub">${totalGenerated} mutants generated &middot; ${runResults.length} executed</div>
+      </div>
+    </div>
+
+    <!-- score gauge -->
+    <div class="score-band">
+      <div class="score-gauge">
+        <div class="score-value" style="color:${scoreColor};">${mutationScore}%</div>
+        <div class="score-label">Mutation Score</div>
+        ${progressBar(scoreNum, scoreColor)}
+      </div>
+      <div class="score-stats">
+        <div class="stat-item"><span class="stat-num" style="color:#ffb74d;">${totalGenerated}</span><span class="stat-lbl">Generated</span></div>
+        <div class="stat-item"><span class="stat-num killed">${killedMutants}</span><span class="stat-lbl">Killed</span></div>
+        <div class="stat-item"><span class="stat-num survived">${survivedMutants}</span><span class="stat-lbl">Survived</span></div>
+        <div class="stat-item"><span class="stat-num pending">${pendingMutants}</span><span class="stat-lbl">Pending</span></div>
+      </div>
+    </div>
+
+    ${severityRows ? `
+    <!-- severity breakdown -->
+    <h3 class="sub-heading">Severity Breakdown</h3>
+    <table>
+      <thead><tr>
+        <th>Severity</th><th class="num">Total</th><th class="num">Killed</th>
+        <th class="num">Survived</th><th class="num">Pending</th><th>Kill Rate</th>
+      </tr></thead>
+      <tbody>${severityRows}</tbody>
+    </table>` : ''}
+
+    ${mutantRows ? `
+    <!-- per-mutant detail -->
+    <h3 class="sub-heading" style="margin-top:28px;">Mutant Details</h3>
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th class="num">#</th>
+        <th>Mutant ID</th>
+        <th>File : Line</th>
+        <th>Operator</th>
+        <th>Severity</th>
+        <th>Original</th>
+        <th>Mutated</th>
+        <th>Result</th>
+        <th class="num">Time</th>
+      </tr></thead>
+      <tbody>${mutantRows}</tbody>
+    </table>
+    </div>` : ''}
+  </section>` : '';
+
+  const baselineDurCard = durationMs !== undefined
+    ? `<div class="stat-item"><span class="stat-num" style="color:#64b5f6;">${fmtDur(durationMs)}</span><span class="stat-lbl">Duration</span></div>`
     : '';
 
   return `<!DOCTYPE html>
@@ -1066,38 +1162,194 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Baseline Test Report</title>
+  <title>Mutation Test Report</title>
   <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;padding:24px;background:#1e1e1e;color:#d4d4d4}
-    h1{color:#569cd6;border-bottom:2px solid #569cd6;padding-bottom:8px}
-    .summary{display:flex;gap:16px;margin:16px 0 24px;flex-wrap:wrap}
-    .card{background:#252526;border:1px solid #3c3c3c;border-radius:8px;padding:16px 24px;min-width:120px;text-align:center}
-    .card .value{font-size:2em;font-weight:bold}
-    .card .label{font-size:.85em;opacity:.75;margin-top:4px}
-    .overall{font-size:1.2em;font-weight:bold;margin:8px 0;color:${overallColor}}
-    table{width:100%;border-collapse:collapse;margin-top:12px}
-    th{background:#2d2d2d;text-align:left;padding:10px 12px;font-size:.9em;border-bottom:2px solid #3c3c3c}
-    td{padding:9px 12px;border-bottom:1px solid #2d2d2d;font-size:.9em}
-    tr:hover td{background:#2a2a2a}
-    .footer{margin-top:24px;font-size:.8em;opacity:.6}
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --surface2: #21253a;
+      --border:   #2a2f45;
+      --text:     #c9d1e0;
+      --text-dim: #6b7280;
+      --blue:     #4f9cf9;
+      --green:    #4caf50;
+      --red:      #ef5350;
+      --orange:   #ffb74d;
+      --purple:   #ab47bc;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* ── Page shell ──────────────────────────────────────── */
+    .page-header {
+      background: linear-gradient(135deg, #1a1d27 0%, #12162a 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 28px 40px 24px;
+      display: flex;
+      align-items: flex-start;
+      gap: 20px;
+    }
+    .header-logo { font-size: 2.4em; line-height: 1; }
+    .header-title { font-size: 1.6em; font-weight: 700; color: #e2e8f0; letter-spacing: -.3px; }
+    .header-meta  { font-size: .82em; color: var(--text-dim); margin-top: 4px; }
+    .header-badge {
+      margin-left: auto; align-self: center;
+      padding: 6px 18px; border-radius: 24px; font-size: .88em; font-weight: 700; letter-spacing: .5px;
+    }
+    .badge-passed { background: #1b5e20; color: #a5d6a7; border: 1px solid #2e7d32; }
+    .badge-failed { background: #b71c1c; color: #ef9a9a; border: 1px solid #c62828; }
+
+    main { padding: 32px 40px; max-width: 1400px; margin: 0 auto; }
+
+    /* ── Sections ────────────────────────────────────────── */
+    section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin-bottom: 24px;
+    }
+    .section-header {
+      display: flex; align-items: flex-start; gap: 14px;
+      margin-bottom: 20px; padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-icon { font-size: 1.6em; line-height: 1; }
+    .section-title { font-size: 1.08em; font-weight: 600; color: #e2e8f0; }
+    .section-sub   { font-size: .8em; color: var(--text-dim); margin-top: 2px; }
+    .sub-heading {
+      font-size: .9em; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .8px; color: var(--text-dim);
+      margin: 22px 0 10px;
+    }
+
+    /* ── Summary stat strip ──────────────────────────────── */
+    .stat-strip {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-item {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 20px;
+      display: flex; flex-direction: column; align-items: center; min-width: 100px;
+    }
+    .stat-num  { font-size: 1.7em; font-weight: 700; line-height: 1; }
+    .stat-lbl  { font-size: .78em; color: var(--text-dim); margin-top: 4px; }
+    .killed    { color: var(--green); }
+    .survived  { color: var(--red); }
+    .pending   { color: #78909c; }
+
+    /* ── Mutation score band ──────────────────────────────── */
+    .score-band {
+      display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px 24px; margin-bottom: 22px;
+    }
+    .score-gauge { min-width: 160px; }
+    .score-value { font-size: 2.8em; font-weight: 800; line-height: 1; }
+    .score-label { font-size: .82em; color: var(--text-dim); margin-top: 4px; }
+    .score-stats { display: flex; flex-wrap: wrap; gap: 12px; flex: 1; align-items: center; }
+
+    /* ── Tables ──────────────────────────────────────────── */
+    .table-scroll { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: .86em;
+    }
+    thead tr {
+      background: var(--surface2);
+      border-bottom: 2px solid var(--border);
+    }
+    th {
+      padding: 10px 14px; text-align: left;
+      font-size: .78em; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .6px;
+      color: var(--text-dim); white-space: nowrap;
+    }
+    td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr.even td { background: rgba(255,255,255,.018); }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: rgba(79,156,249,.06); }
+    th.num, td.num { text-align: right; }
+    .mono { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: .85em; }
+    .dim  { color: var(--text-dim); }
+    .line-num { color: var(--text-dim); font-size: .85em; }
+
+    /* ── Code chips ──────────────────────────────────────── */
+    code { border-radius: 4px; padding: 1px 6px; font-size: .84em; font-family: "SF Mono","Fira Code",Consolas,monospace; }
+    .op-type  { background: #1a237e22; color: #90caf9; border: 1px solid #1a237e55; }
+    .orig     { background: #1b5e2022; color: #a5d6a7; border: 1px solid #1b5e2044; }
+    .mut      { background: #b71c1c22; color: #ef9a9a; border: 1px solid #b71c1c44; }
+    .killing-test { font-size: .76em; color: var(--text-dim); margin-top: 3px; font-style: italic; }
+
+    /* ── Footer ──────────────────────────────────────────── */
+    footer {
+      text-align: center; font-size: .78em; color: var(--text-dim);
+      padding: 20px 40px 32px; border-top: 1px solid var(--border);
+      margin-top: 8px;
+    }
   </style>
 </head>
 <body>
-  <h1>🧪 Baseline Test Report</h1>
-  <div class="overall">Overall: ${overallStatus}</div>
-  <div class="summary">
-    <div class="card"><div class="value">${total}</div><div class="label">Total</div></div>
-    <div class="card"><div class="value" style="color:#4caf50;">${passed}</div><div class="label">Passed</div></div>
-    <div class="card"><div class="value" style="color:#f44336;">${failed}</div><div class="label">Failed</div></div>
-    ${durationCard}
-    ${mutationCards}
-  </div>
-  <table>
-    <thead><tr><th>Test Name</th><th>Status</th><th>Duration</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>
-  ${severitySection}
-  <div class="footer">Generated by AI Mutation Testing Extension &mdash; ${timestamp}</div>
+
+  <!-- PAGE HEADER -->
+  <header class="page-header">
+    <div class="header-logo">🧬</div>
+    <div>
+      <div class="header-title">Mutation Test Report</div>
+      <div class="header-meta">Generated&nbsp;&nbsp;${timestamp} &nbsp;&middot;&nbsp; <span style="font-family:monospace;">${isoStamp}</span></div>
+    </div>
+    <span class="header-badge ${failed === 0 ? 'badge-passed' : 'badge-failed'}">
+      Baseline ${overallStatus}
+    </span>
+  </header>
+
+  <main>
+
+  <!-- ═══ BASELINE SUMMARY ══════════════════════════════════ -->
+  <section>
+    <div class="section-header">
+      <span class="section-icon">🧪</span>
+      <div>
+        <div class="section-title">Baseline Test Suite</div>
+        <div class="section-sub">Ground truth — all tests must pass before mutation analysis</div>
+      </div>
+    </div>
+
+    <div class="stat-strip">
+      <div class="stat-item"><span class="stat-num">${total}</span><span class="stat-lbl">Total Tests</span></div>
+      <div class="stat-item"><span class="stat-num killed">${passed}</span><span class="stat-lbl">Passed</span></div>
+      <div class="stat-item"><span class="stat-num survived">${failed}</span><span class="stat-lbl">Failed</span></div>
+      ${baselineDurCard}
+    </div>
+
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>Test Name</th>
+        <th>Result</th>
+        <th class="num">Duration</th>
+      </tr></thead>
+      <tbody>${testRows}</tbody>
+    </table>
+    </div>
+  </section>
+
+  ${mutantSection}
+
+  </main>
+
+  <footer>
+    AI Mutation Testing Extension &nbsp;&middot;&nbsp; Report generated ${timestamp}
+  </footer>
 </body>
 </html>`;
 }
