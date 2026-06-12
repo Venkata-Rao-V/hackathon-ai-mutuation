@@ -9,6 +9,7 @@ let statusBarItem: vscode.StatusBarItem;
 let treeDataProvider: MutationTreeDataProvider;
 let activeMutantsList: any[] = [];
 let activeDiffMutant: any = null;
+let lastBaselineResult: { tests: any[]; durationMs?: number } = { tests: [] };
 
 function loadYamlConfig(wsDir: string): any {
   const defaultConfig = {
@@ -142,8 +143,16 @@ export function activate(context: vscode.ExtensionContext) {
         }
         
         treeDataProvider.refresh({ baseline: baselineList });
+        lastBaselineResult = { tests: baselineList, durationMs: resp.durationMs };
 
-        vscode.window.showInformationMessage(`Golden Master Baseline Succeeded! duration: ${resp.durationMs}ms`);
+        vscode.window.showInformationMessage(
+          `Golden Master Baseline Succeeded! duration: ${resp.durationMs}ms`,
+          'Export as HTML'
+        ).then(sel => {
+          if (sel === 'Export as HTML') {
+            vscode.commands.executeCommand('mutation.exportBaselineHtml');
+          }
+        });
       } else {
         statusBarItem.text = "🧬 Mutation: Baseline FAIL";
         outputChannel.appendLine("❌ Baseline tests are FAILING. Please resolve codebase tests first.");
@@ -872,10 +881,111 @@ export function activate(context: vscode.ExtensionContext) {
     await vscode.commands.executeCommand('mutation.reject', { mutantId });
   });
 
-  context.subscriptions.push(runBaseline, generate, executeRuns, showDiff, proposeKillTest, openDashboard, acceptMutationCmd, rejectMutationCmd, acceptActiveDiff, rejectActiveDiff, clearDataCmd, statusBarItem);
+  // ══════════════════════════════════════════════════════════════
+  // Command: Export Baseline Test Results as HTML
+  // ══════════════════════════════════════════════════════════════
+  let exportBaselineHtml = vscode.commands.registerCommand('mutation.exportBaselineHtml', async () => {
+    if (lastBaselineResult.tests.length === 0) {
+      vscode.window.showWarningMessage('No baseline test results to export. Run baseline tests first.');
+      return;
+    }
+
+    const wsDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const defaultUri = wsDir
+      ? vscode.Uri.file(path.join(wsDir, 'baseline-report.html'))
+      : undefined;
+
+    const saveUri = await vscode.window.showSaveDialog({
+      defaultUri,
+      filters: { 'HTML Report': ['html'] },
+      title: 'Export Baseline Test Results'
+    });
+
+    if (!saveUri) { return; }
+
+    const html = generateBaselineHtmlReport(lastBaselineResult.tests, lastBaselineResult.durationMs);
+    fs.writeFileSync(saveUri.fsPath, html, 'utf8');
+
+    outputChannel.appendLine(`📄 Baseline HTML report exported: ${saveUri.fsPath}`);
+    vscode.window.showInformationMessage(
+      `Baseline report saved: ${path.basename(saveUri.fsPath)}`,
+      'Open in Browser'
+    ).then(sel => {
+      if (sel === 'Open in Browser') {
+        vscode.env.openExternal(saveUri);
+      }
+    });
+  });
+
+  context.subscriptions.push(runBaseline, generate, executeRuns, showDiff, proposeKillTest, openDashboard, acceptMutationCmd, rejectMutationCmd, acceptActiveDiff, rejectActiveDiff, clearDataCmd, exportBaselineHtml, statusBarItem);
 }
 
 export function deactivate() {}
+
+// ══════════════════════════════════════════════════════════════
+// Helper: Generate Baseline HTML Report
+// ══════════════════════════════════════════════════════════════
+function generateBaselineHtmlReport(tests: any[], durationMs?: number): string {
+  const passed = tests.filter(t => t.status === 'PASSED').length;
+  const failed = tests.filter(t => t.status !== 'PASSED').length;
+  const total = tests.length;
+  const timestamp = new Date().toLocaleString();
+  const overallStatus = failed === 0 ? 'PASSED' : 'FAILED';
+  const overallColor = failed === 0 ? '#4caf50' : '#f44336';
+
+  const rows = tests.map(t => {
+    const statusColor = t.status === 'PASSED' ? '#4caf50' : '#f44336';
+    const statusIcon = t.status === 'PASSED' ? '✅' : '❌';
+    const dur = t.durationMs !== undefined ? `${t.durationMs}ms` : '—';
+    return `<tr><td>${escapeHtml(t.name || '')}</td><td style="color:${statusColor};font-weight:bold;">${statusIcon} ${t.status || ''}</td><td>${dur}</td></tr>`;
+  }).join('');
+
+  const durationCard = durationMs !== undefined
+    ? `<div class="card"><div class="value" style="color:#569cd6;">${durationMs}ms</div><div class="label">Duration</div></div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Baseline Test Report</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;padding:24px;background:#1e1e1e;color:#d4d4d4}
+    h1{color:#569cd6;border-bottom:2px solid #569cd6;padding-bottom:8px}
+    .summary{display:flex;gap:16px;margin:16px 0 24px;flex-wrap:wrap}
+    .card{background:#252526;border:1px solid #3c3c3c;border-radius:8px;padding:16px 24px;min-width:120px;text-align:center}
+    .card .value{font-size:2em;font-weight:bold}
+    .card .label{font-size:.85em;opacity:.75;margin-top:4px}
+    .overall{font-size:1.2em;font-weight:bold;margin:8px 0;color:${overallColor}}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th{background:#2d2d2d;text-align:left;padding:10px 12px;font-size:.9em;border-bottom:2px solid #3c3c3c}
+    td{padding:9px 12px;border-bottom:1px solid #2d2d2d;font-size:.9em}
+    tr:hover td{background:#2a2a2a}
+    .footer{margin-top:24px;font-size:.8em;opacity:.6}
+  </style>
+</head>
+<body>
+  <h1>🧪 Baseline Test Report</h1>
+  <div class="overall">Overall: ${overallStatus}</div>
+  <div class="summary">
+    <div class="card"><div class="value">${total}</div><div class="label">Total</div></div>
+    <div class="card"><div class="value" style="color:#4caf50;">${passed}</div><div class="label">Passed</div></div>
+    <div class="card"><div class="value" style="color:#f44336;">${failed}</div><div class="label">Failed</div></div>
+    ${durationCard}
+  </div>
+  <table>
+    <thead><tr><th>Test Name</th><th>Status</th><th>Duration</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="footer">Generated by AI Mutation Testing Extension &mdash; ${timestamp}</div>
+</body>
+</html>`;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 // ══════════════════════════════════════════════════════════════
 // HTTP Client helper wrappers
