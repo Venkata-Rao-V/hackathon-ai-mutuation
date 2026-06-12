@@ -11,6 +11,7 @@ let activeMutantsList: any[] = [];
 let activeDiffMutant: any = null;
 let lastBaselineResult: { tests: any[]; durationMs?: number } = { tests: [] };
 let lastRunResults: any[] = [];
+let lastSelectedSourceFiles: string[] = [];
 
 function loadYamlConfig(wsDir: string): any {
   const defaultConfig = {
@@ -262,6 +263,7 @@ export function activate(context: vscode.ExtensionContext) {
       const mutantsFound = resp && resp.mutants ? resp.mutants : [];
 
       activeMutantsList = mutantsFound.map((m: any) => ({ ...m, status: 'PENDING', accepted: true }));
+      lastSelectedSourceFiles = [...targetFiles];
       
       // Update sectioned tree metadata
       treeDataProvider.refresh({ mutants: activeMutantsList });
@@ -564,6 +566,7 @@ export function activate(context: vscode.ExtensionContext) {
       activeMutantsList = [];
       lastRunResults = [];
       lastBaselineResult = { tests: [] };
+      lastSelectedSourceFiles = [];
       treeDataProvider.refresh({ baseline: [], mutants: [], runs: [] });
       statusBarItem.text = "🧬 Mutation testing system reset";
       outputChannel.appendLine("=================================================");
@@ -575,6 +578,7 @@ export function activate(context: vscode.ExtensionContext) {
       activeMutantsList = [];
       lastRunResults = [];
       lastBaselineResult = { tests: [] };
+      lastSelectedSourceFiles = [];
       treeDataProvider.refresh({ baseline: [], mutants: [], runs: [] });
       statusBarItem.text = "🧬 Local mutation testing system reset";
       outputChannel.appendLine(`⚠️ Local session reset (remote reset failed: ${err.message})`);
@@ -946,6 +950,7 @@ export function activate(context: vscode.ExtensionContext) {
       baselineDurationMs: lastBaselineResult.durationMs,
       mutants: activeMutantsList,
       runResults: lastRunResults,
+      sourceFiles: lastSelectedSourceFiles,
       generatedAt: now
     });
 
@@ -1026,7 +1031,8 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number): string {
 }
 
 function languageFromPath(filePath: string): string {
-  const ext = path.extname((filePath || '').toLowerCase());
+  const cleaned = (filePath || '').trim().replace(/\\/g, '/');
+  const ext = path.extname(cleaned.toLowerCase());
   if (ext === '.py') {
     return 'Python';
   }
@@ -1055,16 +1061,24 @@ function extractTestName(raw: string): string {
   return compact;
 }
 
+function escapeMarkdownCell(value: any): string {
+  return String(value ?? '')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ');
+}
+
 function generateMutationMarkdownReport(data: {
   baselineTests: any[];
   baselineDurationMs?: number;
   mutants: any[];
   runResults: any[];
+  sourceFiles?: string[];
   generatedAt: Date;
 }): string {
   const baselineTests = data.baselineTests || [];
   const mutants = data.mutants || [];
   const runResults = data.runResults || [];
+  const sourceFiles = data.sourceFiles || [];
 
   const runStatusByMutant = new Map<string, string>();
   for (const run of runResults) {
@@ -1081,8 +1095,21 @@ function generateMutationMarkdownReport(data: {
   const mutationScore = runResults.length > 0 ? ((killedMutants / runResults.length) * 100).toFixed(1) : '0.0';
 
   const langAgg = new Map<string, { total: number; accepted: number; rejected: number; killed: number; survived: number; pending: number }>();
+
+  // Seed language buckets from selected sources so C appears even when no mutants were generated for a file.
+  for (const src of sourceFiles) {
+    const lang = languageFromPath(src);
+    if (!langAgg.has(lang)) {
+      langAgg.set(lang, { total: 0, accepted: 0, rejected: 0, killed: 0, survived: 0, pending: 0 });
+    }
+  }
+
+  const sourceAgg = new Map<string, { language: string; mutants: number; killed: number; survived: number; pending: number }>();
+  const sourceByMutant = new Map<string, string>();
+
   for (const m of mutants) {
-    const lang = languageFromPath(m.file_path || '');
+    const sourcePath = (m.file_path || m.filePath || 'unknown').toString();
+    const lang = languageFromPath(sourcePath);
     const current = langAgg.get(lang) || { total: 0, accepted: 0, rejected: 0, killed: 0, survived: 0, pending: 0 };
     current.total += 1;
     if (m.accepted === false) {
@@ -1100,6 +1127,24 @@ function generateMutationMarkdownReport(data: {
       current.pending += 1;
     }
     langAgg.set(lang, current);
+
+    sourceByMutant.set(m.mutant_id, sourcePath);
+    const sourceCurrent = sourceAgg.get(sourcePath) || { language: lang, mutants: 0, killed: 0, survived: 0, pending: 0 };
+    sourceCurrent.mutants += 1;
+    if (runStatus === 'KILLED') {
+      sourceCurrent.killed += 1;
+    } else if (runStatus === 'SURVIVED') {
+      sourceCurrent.survived += 1;
+    } else {
+      sourceCurrent.pending += 1;
+    }
+    sourceAgg.set(sourcePath, sourceCurrent);
+  }
+
+  for (const src of sourceFiles) {
+    if (!sourceAgg.has(src)) {
+      sourceAgg.set(src, { language: languageFromPath(src), mutants: 0, killed: 0, survived: 0, pending: 0 });
+    }
   }
 
   const testCaseAgg = new Map<string, { baselinePassed: number; baselineFailed: number; killedMutants: number }>();
@@ -1133,8 +1178,12 @@ function generateMutationMarkdownReport(data: {
     return `| ${lang} | ${v.total} | ${v.accepted} | ${v.rejected} | ${v.killed} | ${v.survived} | ${v.pending} |`;
   }).join('\n');
 
+  const sourceRows = Array.from(sourceAgg.entries()).map(([src, v]) => {
+    return `| ${src} | ${v.language} | ${v.mutants} | ${v.killed} | ${v.survived} | ${v.pending} |`;
+  }).join('\n');
+
   const testRows = Array.from(testCaseAgg.entries()).map(([name, v]) => {
-    return `| ${name} | ${v.baselinePassed} | ${v.baselineFailed} | ${v.killedMutants} |`;
+    return `| ${escapeMarkdownCell(name)} | ${v.baselinePassed} | ${v.baselineFailed} | ${v.killedMutants} |`;
   }).join('\n');
 
   const baselineTotal = baselineTests.length;
@@ -1142,6 +1191,33 @@ function generateMutationMarkdownReport(data: {
   const baselineFailed = baselineTotal - baselinePassed;
   const generatedAt = data.generatedAt.toISOString();
   const baselineDuration = data.baselineDurationMs !== undefined ? `${data.baselineDurationMs} ms` : 'N/A';
+
+  const languages = Array.from(langAgg.keys()).sort((a, b) => a.localeCompare(b));
+  const languageSpecificSections = languages.map(lang => {
+    const langSourceRows = Array.from(sourceAgg.entries())
+      .filter(([, v]) => v.language === lang)
+      .map(([src, v]) => `| ${escapeMarkdownCell(src)} | ${v.mutants} | ${v.killed} | ${v.survived} | ${v.pending} |`)
+      .join('\n');
+
+    const langMutants = mutants.filter(m => languageFromPath(m.file_path || m.filePath || '') === lang);
+    const langMutantRows = langMutants.map((m, idx) => {
+      const runStatus = runStatusByMutant.get(m.mutant_id) || m.status || 'PENDING';
+      const accepted = m.accepted === false ? 'REJECTED' : 'ACCEPTED';
+      const file = m.file_path || m.filePath || 'unknown';
+      return `| ${idx + 1} | ${escapeMarkdownCell(m.mutant_id || '-')} | ${escapeMarkdownCell(file)} | ${m.line_number || '-'} | ${escapeMarkdownCell(m.operator_type || '-')} | ${escapeMarkdownCell(m.original_code || '-')} | ${escapeMarkdownCell(m.mutated_value || '-')} | ${accepted} | ${runStatus} |`;
+    }).join('\n');
+
+    return `### ${lang}
+
+| Source File | Mutants | Killed | Survived | Pending |
+| --- | ---: | ---: | ---: | ---: |
+${langSourceRows || '| N/A | 0 | 0 | 0 | 0 |'}
+
+| # | Mutant ID | File | Line | Operator Type | Original | Mutated | Selection | Final Status |
+| ---: | --- | --- | ---: | --- | --- | --- | --- | --- |
+${langMutantRows || '| 1 | N/A | N/A | - | - | - | - | - | - |'}
+`;
+  }).join('\n');
 
   return `# Mutation Testing Consolidated Report
 
@@ -1162,6 +1238,16 @@ Generated at: ${generatedAt}
 | Language | Total Mutants | Accepted | Rejected | Killed | Survived | Pending |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 ${languageRows || '| N/A | 0 | 0 | 0 | 0 | 0 | 0 |'}
+
+## Source-wise Summary
+
+| Source File | Language | Mutants | Killed | Survived | Pending |
+| --- | --- | ---: | ---: | ---: | ---: |
+${sourceRows || '| N/A | N/A | 0 | 0 | 0 | 0 |'}
+
+## Language-specific Sections
+
+${languageSpecificSections || 'No language-specific data available.'}
 
 ## Test Case-wise Summary
 
