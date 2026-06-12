@@ -1,28 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Mutation Testing — Dev Container Compose Stack
+#
+# Services:
+#   devcontainer  – development container (Python, Node, g++, extension build)
+#   prometheus    – scrapes /metrics from devcontainer:8000
+#   grafana       – dashboards backed by Prometheus; auto-provisioned datasource
+#
+# All three share the "mutation-net" bridge network so they can resolve
+# each other by service name (e.g. prometheus → "prometheus:9090").
+# ─────────────────────────────────────────────────────────────────────────────
 version: '3.8'
 
-services:
-  devcontainer:
-    image: mcr.microsoft.com/devcontainers/base:ubuntu
-    volumes:
-      - ..:/workspace:cached
-    network_mode: service:prometheus # Share network stack with Prometheus/Grafana or define common network
-    command: /bin/sh -c "while sleep 1000; do :; done"
+networks:
+  mutation-net:
+    driver: bridge
 
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
+volumes:
+  grafana-data:
+
+services:
+
+  # ── Dev container ──────────────────────────────────────────
+  devcontainer:
+    build:
+      context: ..                    # project root as build context
+      dockerfile: .devcontainer/Dockerfile
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ..:/workspace:cached         # live-mount project source
+    networks:
+      - mutation-net
+    ports:
+      - "8000:8000"                  # Core Mutation Service (FastAPI)
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    # keep container alive; actual processes started by devcontainer lifecycle hooks
+    command: /bin/sh -c "while sleep 3600; do :; done"
+
+  # ── Prometheus ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    networks:
+      - mutation-net
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
+    restart: unless-stopped
 
+  # ── Grafana ────────────────────────────────────────────────
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:10.4.2
     container_name: grafana
+    networks:
+      - mutation-net
     ports:
       - "3000:3000"
     environment:
+      - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
+    restart: unless-stopped
