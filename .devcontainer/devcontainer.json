@@ -28,7 +28,7 @@
         "eamodio.gitlens"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python3",
+        "python.defaultInterpreterPath": "/usr/bin/python3",
         "mutationTesting.coreServiceUrl": "http://localhost:8000",
         "mutationTesting.grafanaUrl": "http://localhost:3000",
         "terminal.integrated.defaultProfile.linux": "bash",
