@@ -90,7 +90,7 @@ class AIEngine:
         to catch and kill the specified mutated variant.
         """
         file_path = mutant.get("file_path", "") or ""
-        is_cpp = file_path.endswith(".cpp") or file_path.endswith(".cc") or file_path.endswith(".hpp") or file_path.endswith(".h") or "mut_cpp_" in mutant.get("mutant_id", "")
+        is_cpp = file_path.endswith(".cpp") or file_path.endswith(".cc") or file_path.endswith(".hpp") or file_path.endswith(".h") or file_path.endswith(".c") or "mut_cpp_" in mutant.get("mutant_id", "")
 
         if is_cpp:
             prompt = f"""You are an expert software test engineer. Write a targeted C++ GoogleTest (gtest) case to KILL a surviving code mutant.
@@ -196,7 +196,7 @@ Output ONLY valid JSON matching this schema:
         orig = mutant.get("original") or mutant.get("original_code") or ""
         mut = mutant.get("mutated") or mutant.get("mutated_value") or ""
         file_path = mutant.get("file_path", "") or ""
-        is_cpp = file_path.endswith(".cpp") or file_path.endswith(".cc") or file_path.endswith(".hpp") or file_path.endswith(".h") or "mut_cpp_" in mutant.get("mutant_id", "")
+        is_cpp = file_path.endswith(".cpp") or file_path.endswith(".cc") or file_path.endswith(".hpp") or file_path.endswith(".h") or file_path.endswith(".c") or "mut_cpp_" in mutant.get("mutant_id", "")
 
         if is_cpp:
             test_code_lines = [

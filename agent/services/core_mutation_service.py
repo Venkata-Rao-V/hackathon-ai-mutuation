@@ -19,7 +19,7 @@ from parser import PythonASTAdapter, CppASTAdapter
 from test_runner import PytestRunnerAdapter, CppRunnerAdapter
 from ai_engine import AIEngine
 
-CPP_EXTENSIONS = [".cpp", ".cc", ".cxx", ".hpp", ".h"]
+CPP_EXTENSIONS = [".cpp", ".cc", ".cxx", ".hpp", ".h", ".c"]
 
 
 def is_cpp_source(file_path: str) -> bool:
@@ -29,12 +29,25 @@ def is_cpp_source(file_path: str) -> bool:
 def detect_language_from_targets(workspace_dir: str, target_files: Optional[List[str]]) -> str:
     for file_path in target_files or []:
         candidate = file_path if os.path.isabs(file_path) else os.path.join(workspace_dir, file_path)
+        if os.path.splitext(candidate)[1].lower() == ".c":
+            return "c"
         if is_cpp_source(candidate):
             return "cpp"
     return "python"
 
 
+def detect_language_from_file_path(file_path: str) -> str:
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".c":
+        return "c"
+    if ext in CPP_EXTENSIONS:
+        return "cpp"
+    return "python"
+
+
 def ai_config_for_language(language: str) -> Dict[str, Any]:
+    if language == "c":
+        return APP_CONFIG.get("ai_engine_c", APP_CONFIG.get("ai_engine_cpp", APP_CONFIG.get("ai_engine", {})))
     if language == "cpp":
         return APP_CONFIG.get("ai_engine_cpp", APP_CONFIG.get("ai_engine", {}))
     return APP_CONFIG.get("ai_engine_python", APP_CONFIG.get("ai_engine", {}))
@@ -60,7 +73,7 @@ def get_runner_for_file(filePath: str):
 def get_runner_for_workspace(workspace_dir: str, target_files: Optional[List[str]] = None, requested_runner: Optional[str] = None):
     if requested_runner:
         req_lower = requested_runner.lower()
-        if "g++" in req_lower or "cpp" in req_lower or "gcc" in req_lower or "gtest" in req_lower:
+        if req_lower == "c" or "g++" in req_lower or "cpp" in req_lower or "gcc" in req_lower or "gtest" in req_lower:
             return CppRunnerAdapter()
         elif "pytest" in req_lower or "python" in req_lower:
             return PytestRunnerAdapter()
@@ -69,13 +82,13 @@ def get_runner_for_workspace(workspace_dir: str, target_files: Optional[List[str
         for f in target_files:
             if os.path.splitext(f)[1].lower() in CPP_EXTENSIONS:
                 return CppRunnerAdapter()
-    if os.path.exists(os.path.join(workspace_dir, "agent", "hello.cpp")) or os.path.exists(os.path.join(workspace_dir, "hello.cpp")):
+    if os.path.exists(os.path.join(workspace_dir, "agent", "hello.cpp")) or os.path.exists(os.path.join(workspace_dir, "hello.cpp")) or os.path.exists(os.path.join(workspace_dir, "agent", "hello.c")) or os.path.exists(os.path.join(workspace_dir, "hello.c")):
         config_path = os.path.join(workspace_dir, "mutation_config.yml")
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                if "hello.cpp" in content or "test_runner: g++" in content or "test_runner: cpp" in content:
+                if "hello.cpp" in content or "hello.c" in content or "test_runner: g++" in content or "test_runner: gcc" in content or "test_runner: cpp" in content or "test_runner: c" in content:
                     return CppRunnerAdapter()
                 elif "hello.py" in content:
                     return PytestRunnerAdapter()
@@ -173,7 +186,7 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
     if req_runner in ["pytest", "python"]:
         if has_pytest:
             runners_to_run.append(("python", pytest_runner))
-    elif req_runner in ["g++", "cpp", "gcc", "gtest"]:
+    elif req_runner in ["g++", "cpp", "c", "gcc", "gtest"]:
         if has_cpp:
             runners_to_run.append(("cpp", cpp_runner))
     else:  # "all", "both" or automatic detection
@@ -206,6 +219,10 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
             primary_file = os.path.join(payload.workspaceDir, "agent", "hello.cpp")
             if not os.path.exists(primary_file):
                 primary_file = os.path.join(payload.workspaceDir, "hello.cpp")
+            if not os.path.exists(primary_file):
+                primary_file = os.path.join(payload.workspaceDir, "agent", "hello.c")
+            if not os.path.exists(primary_file):
+                primary_file = os.path.join(payload.workspaceDir, "hello.c")
         else:
             primary_file = os.path.join(payload.workspaceDir, "agent", "hello.py")
 
@@ -344,8 +361,10 @@ def preview_mutation(projectId: str, mutantId: str, payload: Dict[str, Any]):
         orig_file = os.path.join(workspace_dir, orig_file)
 
     if not os.path.exists(orig_file):
-        if orig_file.endswith(".cpp") or orig_file.endswith(".hpp") or orig_file.endswith(".h"):
+        if is_cpp_source(orig_file):
             fallback = os.path.join(workspace_dir, "agent", "hello.cpp") if workspace_dir else None
+            if fallback and not os.path.exists(fallback):
+                fallback = os.path.join(workspace_dir, "agent", "hello.c") if workspace_dir else None
         else:
             fallback = os.path.join(workspace_dir, "agent", "hello.py") if workspace_dir else None
         if fallback and os.path.exists(fallback):
@@ -382,8 +401,10 @@ def run_mutation_workers_background(run_id: str, proj_id: str, ws_dir: str, muta
 
         if not os.path.exists(orig_file):
             # Fallback pathing resolution
-            if orig_file.endswith(".cpp") or orig_file.endswith(".hpp") or orig_file.endswith(".h"):
+            if is_cpp_source(orig_file):
                 fallback = os.path.join(ws_dir, "agent", "hello.cpp")
+                if not os.path.exists(fallback):
+                    fallback = os.path.join(ws_dir, "agent", "hello.c")
             else:
                 fallback = os.path.join(ws_dir, "agent", "hello.py")
             if os.path.exists(fallback):
@@ -472,8 +493,10 @@ def execute_tests_generation(projectId: str, payload: TestGenerateRequest):
         tgt_rel = payload.targetFiles[0] if payload.targetFiles else "agent/hello.py"
         full_tgt = os.path.join(payload.workspaceDir, tgt_rel)
         if not os.path.exists(full_tgt):
-            if tgt_rel.endswith(".cpp") or tgt_rel.endswith(".h"):
+            if is_cpp_source(tgt_rel):
                 full_tgt = os.path.join(payload.workspaceDir, "agent", "hello.cpp")
+                if not os.path.exists(full_tgt):
+                    full_tgt = os.path.join(payload.workspaceDir, "agent", "hello.c")
             else:
                 full_tgt = os.path.join(payload.workspaceDir, "agent", "hello.py")
         
@@ -483,7 +506,11 @@ def execute_tests_generation(projectId: str, payload: TestGenerateRequest):
         # Load standard existing tests to provide styling structure
         full_test = os.path.join(payload.workspaceDir, payload.testFile)
         if not os.path.exists(full_test):
-            fallback_test = "agent/test_hello.cpp" if payload.testFile.endswith(".cpp") else "agent/test_hello.py"
+            fallback_test = "agent/test_hello.py"
+            if is_cpp_source(payload.testFile):
+                fallback_test = "agent/test_hello.c"
+                if not os.path.exists(os.path.join(payload.workspaceDir, fallback_test)):
+                    fallback_test = "agent/test_hello.cpp"
             full_test = os.path.join(payload.workspaceDir, fallback_test)
 
         existing_t = ""
@@ -491,7 +518,7 @@ def execute_tests_generation(projectId: str, payload: TestGenerateRequest):
             with open(full_test, "r", encoding="utf-8") as f:
                 existing_t = f.read()[:1500] # trim context length limit
 
-        language = "cpp" if is_cpp_source(mutant.get("file_path", tgt_rel)) else "python"
+        language = detect_language_from_file_path(mutant.get("file_path", tgt_rel))
         ai_engine = build_ai_engine(language, payload.aiEngineProvider, payload.aiApiKey)
         ans = ai_engine.generate_test_to_kill_survivor(tgt_src, mutant, existing_t)
         proposed_tests.append({
@@ -613,6 +640,15 @@ def load_config() -> dict:
             "openai_api_key_env": "OPENAI_API_KEY"
         },
         "ai_engine_cpp": {
+            "provider": "openai",
+            "openai_model": "gpt-4o",
+            "ollama_model": "llama3",
+            "openai_temperature": 0.1,
+            "ollama_host": "http://localhost:11434",
+            "ollama_timeout_seconds": 30,
+            "openai_api_key_env": "OPENAI_API_KEY"
+        },
+        "ai_engine_c": {
             "provider": "openai",
             "openai_model": "gpt-4o",
             "ollama_model": "llama3",

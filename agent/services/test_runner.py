@@ -222,9 +222,11 @@ class CppRunnerAdapter(TestRunnerAdapter):
     """Execution adapter implementing isolated C++ GoogleTest runs using standard g++ compiler."""
 
     def detect_workspace(self, root_path: str) -> bool:
-        # Check standard C++ files
+        # Check standard C/C++ files
         return os.path.exists(os.path.join(root_path, "agent", "hello.cpp")) or \
-               os.path.exists(os.path.join(root_path, "hello.cpp"))
+               os.path.exists(os.path.join(root_path, "hello.cpp")) or \
+               os.path.exists(os.path.join(root_path, "agent", "hello.c")) or \
+               os.path.exists(os.path.join(root_path, "hello.c"))
 
     def execute_suite(
         self,
@@ -269,15 +271,22 @@ class CppRunnerAdapter(TestRunnerAdapter):
             with open(sandbox_target_path, "w", encoding="utf-8") as f:
                 f.write(mutated_code)
 
-        # Step 4: Locate candidate C++ source and test files
-        # Fallback locate matching source files
-        hello_cpp = os.path.join(sandbox_dir, "agent", "hello.cpp")
-        if not os.path.exists(hello_cpp):
-            hello_cpp = os.path.join(sandbox_dir, "hello.cpp")
+        # Step 4: Locate candidate C/C++ source and test files
+        source_candidates = [
+            os.path.join(sandbox_dir, "agent", "hello.cpp"),
+            os.path.join(sandbox_dir, "hello.cpp"),
+            os.path.join(sandbox_dir, "agent", "hello.c"),
+            os.path.join(sandbox_dir, "hello.c"),
+        ]
+        hello_cpp = next((p for p in source_candidates if os.path.exists(p)), source_candidates[0])
 
-        test_hello_cpp = os.path.join(sandbox_dir, "agent", "test_hello.cpp")
-        if not os.path.exists(test_hello_cpp):
-            test_hello_cpp = os.path.join(sandbox_dir, "test_hello.cpp")
+        test_candidates = [
+            os.path.join(sandbox_dir, "agent", "test_hello.cpp"),
+            os.path.join(sandbox_dir, "test_hello.cpp"),
+            os.path.join(sandbox_dir, "agent", "test_hello.c"),
+            os.path.join(sandbox_dir, "test_hello.c"),
+        ]
+        test_hello_cpp = next((p for p in test_candidates if os.path.exists(p)), test_candidates[0])
 
         # Binary compilation path matching Windows / Unix
         bin_ext = ".exe" if sys.platform == "win32" else ""
@@ -285,8 +294,15 @@ class CppRunnerAdapter(TestRunnerAdapter):
 
         # Step 5: Compile and run via g++
         try:
-            # Command arguments for standard C++17 compilation
-            compile_cmd = ["g++", "-std=c++17", hello_cpp, test_hello_cpp, "-o", out_bin]
+            source_ext = os.path.splitext(hello_cpp)[1].lower()
+            test_ext = os.path.splitext(test_hello_cpp)[1].lower()
+            is_pure_c = source_ext == ".c" and test_ext == ".c"
+
+            # Use gcc for pure C projects, otherwise compile as C++ for mixed C/C++ tests.
+            if is_pure_c:
+                compile_cmd = ["gcc", "-std=c11", hello_cpp, test_hello_cpp, "-o", out_bin]
+            else:
+                compile_cmd = ["g++", "-std=c++17", hello_cpp, test_hello_cpp, "-o", out_bin]
             
             comp_result = subprocess.run(
                 compile_cmd,
@@ -378,8 +394,8 @@ class CppRunnerAdapter(TestRunnerAdapter):
             }
 
         except FileNotFoundError:
-            # g++ execution not found on parent system loop fallback
-            return self._mock_cpp_execution(mutated_code, target_file, start_time, "g++ is not in environmental PATH")
+            # Compiler execution not found on host system loop fallback
+            return self._mock_cpp_execution(mutated_code, target_file, start_time, "gcc/g++ is not in environmental PATH")
         except subprocess.TimeoutExpired:
             return {
                 "overallStatus": "TIMEOUT",
