@@ -18,10 +18,29 @@ except ImportError:
 class AIEngine:
     """The central orchestrator mediating AI operations."""
 
-    def __init__(self, provider: str = "openai", api_key: Optional[str] = None, model: Optional[str] = None):
-        self.provider = provider.lower()
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "mock-key")
-        self.model = model or ("gpt-4o" if self.provider == "openai" else "llama3")
+    def __init__(
+        self,
+        provider: str = "openai",
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ):
+        self.config = config or {}
+        self.provider = (provider or self.config.get("provider", "mock")).lower()
+
+        api_key_env = self.config.get("openai_api_key_env", "OPENAI_API_KEY")
+        self.api_key = api_key or os.environ.get(api_key_env, "mock-key")
+
+        if model:
+            self.model = model
+        elif self.provider == "openai":
+            self.model = self.config.get("openai_model", "gpt-4o")
+        else:
+            self.model = self.config.get("ollama_model", "llama3")
+
+        self.openai_temperature = float(self.config.get("openai_temperature", 0.1))
+        self.ollama_host = self.config.get("ollama_host", "http://localhost:11434")
+        self.ollama_timeout_seconds = int(self.config.get("ollama_timeout_seconds", 30))
 
         # Initialize standard OpenAI client if requested
         if self.provider == "openai" and "mock-key" not in self.api_key:
@@ -142,7 +161,7 @@ Output ONLY valid JSON matching this schema:
                         {"role": "system", "content": "You are a test-generation robot. Only return valid JSON."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.1,
+                    temperature=self.openai_temperature,
                     response_format={"type": "json_object"}
                 )
                 raw_json = response.choices[0].message.content
@@ -156,13 +175,13 @@ Output ONLY valid JSON matching this schema:
             import requests
             try:
                 # Target local Ollama server running in Dev Container
-                ollama_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434") + "/api/generate"
+                ollama_url = self.ollama_host + "/api/generate"
                 resp = requests.post(ollama_url, json={
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
                     "format": "json"
-                }, timeout=30)
+                }, timeout=self.ollama_timeout_seconds)
                 data = resp.json()
                 return json.loads(data.get("response", "{}"))
             except Exception as e:

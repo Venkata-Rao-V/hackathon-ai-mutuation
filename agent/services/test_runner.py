@@ -44,6 +44,7 @@ class PytestRunnerAdapter(TestRunnerAdapter):
     """Execution adapter implementing isolated Pytest runs."""
 
     def detect_workspace(self, root_path: str) -> bool:
+        print(root_path)
         return os.path.exists(os.path.join(root_path, "pytest.ini")) or \
                os.path.exists(os.path.join(root_path, "setup.cfg")) or \
                os.path.exists(os.path.join(root_path, "agent", "pytest.ini")) or \

@@ -7,6 +7,24 @@ core_service:
 grafana:
   url: "http://localhost:3000"
 
+ai_engine_python:
+  provider: "ollama"
+  openai_model: "gpt-4o"
+  ollama_model: "llama3"
+  openai_temperature: 0.1
+  ollama_host: "http://localhost:11434"
+  ollama_timeout_seconds: 30
+  openai_api_key_env: "OPENAI_API_KEY"
+
+ai_engine_cpp:
+  provider: "openai"
+  openai_model: "gpt-4o"
+  ollama_model: "llama3"
+  openai_temperature: 0.1
+  ollama_host: "http://localhost:11434"
+  ollama_timeout_seconds: 30
+  openai_api_key_env: "OPENAI_API_KEY"
+
 workspace:
   default_source_file: "agent/hello.py"
   default_test_file: "agent/test_hello.py"

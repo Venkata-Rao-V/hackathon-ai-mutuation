@@ -19,15 +19,41 @@ from parser import PythonASTAdapter, CppASTAdapter
 from test_runner import PytestRunnerAdapter, CppRunnerAdapter
 from ai_engine import AIEngine
 
+CPP_EXTENSIONS = [".cpp", ".cc", ".cxx", ".hpp", ".h"]
+
+
+def is_cpp_source(file_path: str) -> bool:
+    return os.path.splitext(file_path)[1].lower() in CPP_EXTENSIONS
+
+
+def detect_language_from_targets(workspace_dir: str, target_files: Optional[List[str]]) -> str:
+    for file_path in target_files or []:
+        candidate = file_path if os.path.isabs(file_path) else os.path.join(workspace_dir, file_path)
+        if is_cpp_source(candidate):
+            return "cpp"
+    return "python"
+
+
+def ai_config_for_language(language: str) -> Dict[str, Any]:
+    if language == "cpp":
+        return APP_CONFIG.get("ai_engine_cpp", APP_CONFIG.get("ai_engine", {}))
+    return APP_CONFIG.get("ai_engine_python", APP_CONFIG.get("ai_engine", {}))
+
+
+def build_ai_engine(language: str, provider_override: Optional[str], api_key: Optional[str]) -> AIEngine:
+    ai_cfg = ai_config_for_language(language)
+    provider = provider_override or ai_cfg.get("provider", "mock")
+    return AIEngine(provider=provider, api_key=api_key, config=ai_cfg)
+
 def get_adapter_for_file(filePath: str):
     ext = os.path.splitext(filePath)[1].lower()
-    if ext in [".cpp", ".cc", ".cxx", ".hpp", ".h"]:
+    if ext in CPP_EXTENSIONS:
         return CppASTAdapter()
     return PythonASTAdapter()
 
 def get_runner_for_file(filePath: str):
     ext = os.path.splitext(filePath)[1].lower()
-    if ext in [".cpp", ".cc", ".cxx", ".hpp", ".h"]:
+    if ext in CPP_EXTENSIONS:
         return CppRunnerAdapter()
     return PytestRunnerAdapter()
 
@@ -41,7 +67,7 @@ def get_runner_for_workspace(workspace_dir: str, target_files: Optional[List[str
 
     if target_files:
         for f in target_files:
-            if os.path.splitext(f)[1].lower() in [".cpp", ".cc", ".cxx", ".hpp", ".h"]:
+            if os.path.splitext(f)[1].lower() in CPP_EXTENSIONS:
                 return CppRunnerAdapter()
     if os.path.exists(os.path.join(workspace_dir, "agent", "hello.cpp")) or os.path.exists(os.path.join(workspace_dir, "hello.cpp")):
         config_path = os.path.join(workspace_dir, "mutation_config.yml")
@@ -97,7 +123,7 @@ class MutationGenerateRequest(BaseModel):
     workspaceDir: str
     targetFiles: List[str]
     operators: List[str] = ["arithmetic", "conditional_boundary", "logical"]
-    aiEngineProvider: str = "mock"
+    aiEngineProvider: Optional[str] = None
     aiApiKey: Optional[str] = None
 
 
@@ -113,7 +139,7 @@ class TestGenerateRequest(BaseModel):
     survivingMutantIds: List[str]
     targetFiles: List[str]
     testFile: str
-    aiEngineProvider: str = "mock"
+    aiEngineProvider: Optional[str] = None
     aiApiKey: Optional[str] = None
 
 
@@ -130,6 +156,7 @@ def api_health():
 def execute_baseline(projectId: str, payload: BaselineRequest):
     """Establish unmodified tests 'Golden Master' baseline metrics."""
     # Support mixed workspaces where both C++ and Python elements are scanned and run
+    print(payload)
     runners_to_run = []
     
     req_runner = payload.testRunner.lower() if payload.testRunner else "all"
@@ -139,6 +166,9 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
     
     has_pytest = pytest_runner.detect_workspace(payload.workspaceDir)
     has_cpp = cpp_runner.detect_workspace(payload.workspaceDir)
+    
+    print(has_pytest)
+    print(req_runner)
     
     if req_runner in ["pytest", "python"]:
         if has_pytest:
@@ -151,7 +181,7 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
             runners_to_run.append(("python", pytest_runner))
         if has_cpp:
             runners_to_run.append(("cpp", cpp_runner))
-            
+
     if not runners_to_run:
         # fallback to what is detected
         if has_pytest:
@@ -254,7 +284,8 @@ def generate_mutations(projectId: str, payload: MutationGenerateRequest):
         all_mutants.extend(file_candidates)
 
     # Apply AI Intelligence selection weighting and prioritization
-    ai_engine = AIEngine(provider=payload.aiEngineProvider, api_key=payload.aiApiKey)
+    language = detect_language_from_targets(payload.workspaceDir, payload.targetFiles)
+    ai_engine = build_ai_engine(language, payload.aiEngineProvider, payload.aiApiKey)
     prioritized_list = ai_engine.prioritize_mutants(all_mutants)
 
     # Cache mutant schemas to server database register
@@ -432,8 +463,6 @@ def query_run_status(projectId: str, runId: str):
 @app.post("/api/v1/projects/{projectId}/tests/generate")
 def execute_tests_generation(projectId: str, payload: TestGenerateRequest):
     """Synthesize custom unit tests designed specifically to kill survivors."""
-    ai_engine = AIEngine(provider=payload.aiEngineProvider, api_key=payload.aiApiKey)
-
     proposed_tests = []
     for m_id in payload.survivingMutantIds:
         mutant = DATABASE["mutations_cache"].get(m_id)
@@ -462,6 +491,8 @@ def execute_tests_generation(projectId: str, payload: TestGenerateRequest):
             with open(full_test, "r", encoding="utf-8") as f:
                 existing_t = f.read()[:1500] # trim context length limit
 
+        language = "cpp" if is_cpp_source(mutant.get("file_path", tgt_rel)) else "python"
+        ai_engine = build_ai_engine(language, payload.aiEngineProvider, payload.aiApiKey)
         ans = ai_engine.generate_test_to_kill_survivor(tgt_src, mutant, existing_t)
         proposed_tests.append({
             "filePath": payload.testFile,
@@ -572,12 +603,50 @@ def load_config() -> dict:
         "grafana": {
             "url": "http://localhost:3000"
         },
+        "ai_engine_python": {
+            "provider": "ollama",
+            "openai_model": "gpt-4o",
+            "ollama_model": "llama3",
+            "openai_temperature": 0.1,
+            "ollama_host": "http://localhost:11434",
+            "ollama_timeout_seconds": 30,
+            "openai_api_key_env": "OPENAI_API_KEY"
+        },
+        "ai_engine_cpp": {
+            "provider": "openai",
+            "openai_model": "gpt-4o",
+            "ollama_model": "llama3",
+            "openai_temperature": 0.1,
+            "ollama_host": "http://localhost:11434",
+            "ollama_timeout_seconds": 30,
+            "openai_api_key_env": "OPENAI_API_KEY"
+        },
+        "ai_engine": {
+            "provider": "mock",
+            "openai_model": "gpt-4o",
+            "ollama_model": "llama3",
+            "openai_temperature": 0.1,
+            "ollama_host": "http://localhost:11434",
+            "ollama_timeout_seconds": 30,
+            "openai_api_key_env": "OPENAI_API_KEY"
+        },
         "workspace": {
             "default_source_file": "agent/hello.py",
             "default_test_file": "agent/test_hello.py",
             "test_runner": "pytest"
         }
     }
+
+    def parse_scalar(val: str):
+        if val.lower() in ["true", "false"]:
+            return val.lower() == "true"
+        if val.isdigit() or (val.startswith("-") and val[1:].isdigit()):
+            return int(val)
+        try:
+            return float(val)
+        except ValueError:
+            return val
+
     # Lookup in parents to resolve absolute repo path
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "mutation_config.yml")
     if not os.path.exists(config_path):
@@ -599,13 +668,9 @@ def load_config() -> dict:
                             current_section = key
                         else:
                             if current_section and current_section in default_config:
-                                if val.isdigit():
-                                    val = int(val)
-                                default_config[current_section][key] = val
+                                default_config[current_section][key] = parse_scalar(val)
                             else:
-                                if val.isdigit():
-                                    val = int(val)
-                                default_config[key] = val
+                                default_config[key] = parse_scalar(val)
         except Exception as e:
             print(f"Error loading mutation_config.yml: {e}")
     return default_config
@@ -617,8 +682,11 @@ def tempfile_dir_root() -> str:
     return path
 
 
+APP_CONFIG = load_config()
+
+
 if __name__ == "__main__":
-    cfg = load_config()
+    cfg = APP_CONFIG
     svc = cfg.get("core_service", {})
     host = svc.get("host", "127.0.0.1")
     port = svc.get("port", 8000)
