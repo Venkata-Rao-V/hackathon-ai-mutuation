@@ -333,6 +333,82 @@ class CppASTAdapter(BaseASTAdapter):
     Scans C++ files to identify candidate operator coordinates and perform mutations.
     """
 
+    @staticmethod
+    def _char_in_ranges(idx: int, ranges: List[tuple]) -> bool:
+        return any(start <= idx <= end for start, end in ranges)
+
+    @staticmethod
+    def _template_angle_ranges(line: str) -> List[tuple]:
+        """Return (start,end) ranges for probable C++ template argument angle brackets."""
+        ranges: List[tuple] = []
+        i = 0
+        n = len(line)
+
+        while i < n:
+            if line[i] != '<':
+                i += 1
+                continue
+
+            # Reject stream/shift operators quickly.
+            if i + 1 < n and line[i + 1] == '<':
+                i += 2
+                continue
+
+            prev_i = i - 1
+            while prev_i >= 0 and line[prev_i].isspace():
+                prev_i -= 1
+            next_i = i + 1
+            while next_i < n and line[next_i].isspace():
+                next_i += 1
+
+            if prev_i < 0 or next_i >= n:
+                i += 1
+                continue
+
+            prev_ch = line[prev_i]
+            next_ch = line[next_i]
+
+            # Template args typically follow type/function identifiers and start with identifier-ish token.
+            if not (prev_ch.isalnum() or prev_ch in ['_', ':', '>']):
+                i += 1
+                continue
+            if not (next_ch.isalpha() or next_ch in ['_', ':']):
+                i += 1
+                continue
+
+            depth = 1
+            j = i + 1
+            while j < n:
+                if line[j] == '<':
+                    # Allow nested templates; ignore shift syntax as template open.
+                    if j + 1 < n and line[j + 1] == '<':
+                        j += 2
+                        continue
+                    depth += 1
+                elif line[j] == '>':
+                    if j + 1 < n and line[j + 1] == '>':
+                        # Could be nested close >>.
+                        depth -= 2
+                        if depth <= 0:
+                            ranges.append((i, j + 1))
+                            i = j + 2
+                            break
+                        j += 2
+                        continue
+                    depth -= 1
+                    if depth == 0:
+                        ranges.append((i, j))
+                        i = j + 1
+                        break
+                elif line[j] == ';' and depth > 0:
+                    # Probably not a template argument list.
+                    break
+                j += 1
+            else:
+                i += 1
+
+        return ranges
+
     def parse_mutations(self, file_path: str, file_content: str) -> List[Dict[str, Any]]:
         candidates = []
         lines = file_content.splitlines()
@@ -361,6 +437,7 @@ class CppASTAdapter(BaseASTAdapter):
         in_block_comment = False
         for line_no, line in enumerate(lines, start=1):
             line_strip = line.strip()
+            template_ranges = self._template_angle_ranges(line)
             
             if in_block_comment:
                 if "*/" in line:
@@ -387,6 +464,9 @@ class CppASTAdapter(BaseASTAdapter):
                 mut_str = None
 
                 if double_op in comparison_transitions:
+                    if self._char_in_ranges(idx, template_ranges) or self._char_in_ranges(idx + 1, template_ranges):
+                        idx += 2
+                        continue
                     matched_op = double_op
                     op_type = "relational_operator_replacement"
                     mut_name, mut_str = comparison_transitions[double_op]
@@ -397,6 +477,9 @@ class CppASTAdapter(BaseASTAdapter):
                     mut_name, mut_str = logical_transitions[double_op]
                     idx += 2
                 elif single_op in comparison_transitions:
+                    if self._char_in_ranges(idx, template_ranges):
+                        idx += 1
+                        continue
                     # Guard stream insertion/extraction, templates or include directives
                     if idx + 1 < len(line) and line[idx+1] in ['<', '>', '=']:
                         idx += 1
