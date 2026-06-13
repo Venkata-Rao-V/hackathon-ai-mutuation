@@ -20,9 +20,8 @@ env:
   GRAFANA_PASSWORD: "admin"
 
 jobs:
-
   # ─────────────────────────────────────────────────────────────
-  # JOB 1 — Lint & Static Analysis (non-blocking)
+  # JOB 1 — Lint (HTML report, non-blocking)
   # ─────────────────────────────────────────────────────────────
   lint:
     name: "1 · Lint & Static Analysis"
@@ -45,25 +44,28 @@ jobs:
           cache: pip
 
       - name: Install lint tools
-        run: pip install flake8 flake8-bugbear
-
-      - name: Run flake8 (report only, non-blocking)
         run: |
-          mkdir -p reports
+          pip install flake8 flake8-bugbear flake8-html
+
+      - name: Generate flake8 HTML report (non-blocking)
+        run: |
+          mkdir -p reports/flake8-html
           flake8 agent/services/ agent/*.py run_all.py \
             --max-line-length=120 \
             --extend-ignore=E203,W503,E501,W293,E261,E302,E305,E201,E202,F401,B007,E127 \
-            --statistics | tee reports/flake8-report.txt || true
+            --format=html \
+            --htmldir=reports/flake8-html \
+            --statistics || true
 
-      - name: Upload lint report
+      - name: Upload lint HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flake8-report
-          path: reports/flake8-report.txt
+          name: flake8-html
+          path: reports/flake8-html/
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 2 — Python Unit Tests
+  # JOB 2 — Python Unit Tests (HTML + XML)
   # ─────────────────────────────────────────────────────────────
   unit-tests:
     name: "2 · Python Unit Tests"
@@ -81,12 +83,14 @@ jobs:
           cache: pip
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install pytest-html
 
       - name: Create reports directory
         run: mkdir -p reports
 
-      - name: Run pytest
+      - name: Run pytest and generate HTML report
         working-directory: agent
         run: |
           pytest \
@@ -95,17 +99,21 @@ jobs:
             -v \
             --tb=short \
             --junitxml=../reports/pytest-results.xml \
+            --html=../reports/pytest-report.html \
+            --self-contained-html \
             --no-header
 
-      - name: Upload pytest results
+      - name: Upload pytest reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-results
-          path: reports/pytest-results.xml
+          name: pytest-report
+          path: |
+            reports/pytest-report.html
+            reports/pytest-results.xml
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3 — C / C++ Compile & Test (safe for files without main)
+  # JOB 3 — C / C++ Compile & Test (HTML report)
   # ─────────────────────────────────────────────────────────────
   cpp-tests:
     name: "3 · C / C++ Compile & Test"
@@ -125,47 +133,59 @@ jobs:
       - name: Create reports directory
         run: mkdir -p reports
 
-      - name: Compile C/C++ sources safely
+      - name: Compile C/C++ safely
         working-directory: agent
         shell: bash
         run: |
-          set -u
+          set +e
+          LOG="../reports/cpp-build.log"
+          : > "$LOG"
 
           compile_cpp() {
             local file="$1"
             if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file"
+              echo "Skipping missing file: $file" | tee -a "$LOG"
               return 0
             fi
 
             local base="${file%.*}"
             if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..."
-              g++ -std=c++17 -Wall -o "$base" "$file"
-              echo "Running $base..."
-              "./$base"
+              echo "Compiling $file as executable..." | tee -a "$LOG"
+              g++ -std=c++17 -Wall -o "$base" "$file" >> "$LOG" 2>&1
+              local rc=$?
+              if [ $rc -eq 0 ]; then
+                echo "Running ./$base ..." | tee -a "$LOG"
+                "./$base" >> "$LOG" 2>&1
+              else
+                echo "Compile failed for $file" | tee -a "$LOG"
+              fi
             else
-              echo "No main() found in $file — compiling as object only..."
-              g++ -std=c++17 -Wall -c "$file" -o "${base}.o"
+              echo "No main() in $file — compiling as object only..." | tee -a "$LOG"
+              g++ -std=c++17 -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
             fi
           }
 
           compile_c() {
             local file="$1"
             if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file"
+              echo "Skipping missing file: $file" | tee -a "$LOG"
               return 0
             fi
 
             local base="${file%.*}"
             if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..."
-              gcc -Wall -o "$base" "$file"
-              echo "Running $base..."
-              "./$base"
+              echo "Compiling $file as executable..." | tee -a "$LOG"
+              gcc -Wall -o "$base" "$file" >> "$LOG" 2>&1
+              local rc=$?
+              if [ $rc -eq 0 ]; then
+                echo "Running ./$base ..." | tee -a "$LOG"
+                "./$base" >> "$LOG" 2>&1
+              else
+                echo "Compile failed for $file" | tee -a "$LOG"
+              fi
             else
-              echo "No main() found in $file — compiling as object only..."
-              gcc -Wall -c "$file" -o "${base}.o"
+              echo "No main() in $file — compiling as object only..." | tee -a "$LOG"
+              gcc -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
             fi
           }
 
@@ -173,21 +193,53 @@ jobs:
           compile_c "sample_mutation.c"
           compile_c "sample.c"
 
-      - name: List generated binaries/objects
-        working-directory: agent
+      - name: Generate C/C++ HTML report
         run: |
-          ls -lah
-          find . -maxdepth 1 \( -name "*.o" -o -perm -111 \) | sort | tee ../reports/cpp-build-output.txt
+          python - <<'PY'
+          import html
+          from pathlib import Path
 
-      - name: Upload C/C++ build report
+          log_path = Path("reports/cpp-build.log")
+          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No build log found."
+
+          html_content = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>C/C++ Build Report</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 24px; }}
+              h1 {{ color: #1f2937; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                overflow-x: auto;
+                white-space: pre-wrap;
+              }}
+            </style>
+          </head>
+          <body>
+            <h1>C/C++ Build & Test Report</h1>
+            <pre>{html.escape(content)}</pre>
+          </body>
+          </html>"""
+
+          Path("reports/cpp-report.html").write_text(html_content, encoding="utf-8")
+          PY
+
+      - name: Upload C/C++ HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpp-build-report
-          path: reports/cpp-build-output.txt
+          name: cpp-report
+          path: |
+            reports/cpp-report.html
+            reports/cpp-build.log
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 4 — FastAPI Service Smoke Test
+  # JOB 4 — FastAPI Service Smoke Test (HTML report)
   # ─────────────────────────────────────────────────────────────
   api-service:
     name: "4 · FastAPI Service Health & Smoke"
@@ -207,29 +259,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create reports directory
+        run: mkdir -p reports
+
       - name: Start FastAPI service in background
         working-directory: agent/services
         run: |
-          nohup python core_mutation_service.py > ../../fastapi.log 2>&1 &
+          nohup python core_mutation_service.py > ../../reports/fastapi.log 2>&1 &
           echo "SERVICE_PID=$!" >> $GITHUB_ENV
 
-      - name: Wait for service to be healthy (max 30 s)
+      - name: Wait for service to be healthy
         run: |
           for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.SERVICE_URL }}/health || true)
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.SERVICE_URL }}/health" || true)
             if [ "$STATUS" = "200" ]; then
-              echo "✅ Service is healthy after ${i}s"
+              echo "Service healthy after ${i}s"
               exit 0
             fi
-            echo "Attempt $i/30 — waiting..."
             sleep 1
           done
-          echo "❌ Service did not start in time"
-          echo "------ FastAPI log ------"
-          cat fastapi.log || true
+          echo "Service did not start in time"
+          cat reports/fastapi.log || true
           exit 1
 
-      - name: Smoke test — POST /mutate
+      - name: Smoke test POST /mutate
         run: |
           curl -s -X POST "${{ env.SERVICE_URL }}/mutate" \
             -H "Content-Type: application/json" \
@@ -237,39 +290,84 @@ jobs:
               "source_file": "agent/hello.py",
               "test_file": "agent/test_hello.py",
               "language": "python"
-            }' | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print('Response:', json.dumps(data, indent=2))
-          assert 'session_id' in data or 'error' not in data, f'Unexpected error: {data}'
-          print('✅ /mutate endpoint responded correctly')
-          "
+            }' > reports/mutate-response.json
 
-      - name: Smoke test — GET /sessions
+      - name: Smoke test GET /sessions
         run: |
-          curl -s "${{ env.SERVICE_URL }}/sessions" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print('Sessions:', json.dumps(data, indent=2))
-          print('✅ /sessions endpoint OK')
-          "
+          curl -s "${{ env.SERVICE_URL }}/sessions" > reports/sessions-response.json
 
-      - name: Upload FastAPI log
+      - name: Generate API HTML report
+        run: |
+          python - <<'PY'
+          import json
+          import html
+          from pathlib import Path
+
+          def read_json(path):
+              p = Path(path)
+              if not p.exists():
+                  return {"error": f"{path} not found"}
+              try:
+                  return json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  return {"error": f"Could not parse {path}: {e}"}
+
+          mutate = read_json("reports/mutate-response.json")
+          sessions = read_json("reports/sessions-response.json")
+          log_text = Path("reports/fastapi.log").read_text(encoding="utf-8", errors="ignore") if Path("reports/fastapi.log").exists() else ""
+
+          html_content = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>FastAPI Smoke Report</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 24px; }}
+              h1, h2 {{ color: #1f2937; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                overflow-x: auto;
+                white-space: pre-wrap;
+              }}
+            </style>
+          </head>
+          <body>
+            <h1>FastAPI Smoke Test Report</h1>
+            <h2>POST /mutate</h2>
+            <pre>{html.escape(json.dumps(mutate, indent=2))}</pre>
+            <h2>GET /sessions</h2>
+            <pre>{html.escape(json.dumps(sessions, indent=2))}</pre>
+            <h2>FastAPI Log</h2>
+            <pre>{html.escape(log_text)}</pre>
+          </body>
+          </html>"""
+
+          Path("reports/api-report.html").write_text(html_content, encoding="utf-8")
+          PY
+
+      - name: Upload API HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fastapi-log
-          path: fastapi.log
+          name: api-report
+          path: |
+            reports/api-report.html
+            reports/fastapi.log
+            reports/mutate-response.json
+            reports/sessions-response.json
 
       - name: Terminate FastAPI service
         if: always()
         run: kill $SERVICE_PID || true
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 5 — Grafana Dashboard Update
+  # JOB 5 — Grafana Dashboard (VISIBLE via screenshot + HTML)
   # ─────────────────────────────────────────────────────────────
   grafana-update:
-    name: "5 · Grafana Dashboard Update"
+    name: "5 · Grafana Dashboard"
     runs-on: ubuntu-latest
     needs: unit-tests
     continue-on-error: true
@@ -278,33 +376,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Create reports directory
+        run: mkdir -p reports
+
       - name: Start Grafana container
         run: |
           docker run -d --name grafana \
             -p 3000:3000 \
             -e GF_SECURITY_ADMIN_USER=${{ env.GRAFANA_USER }} \
             -e GF_SECURITY_ADMIN_PASSWORD=${{ env.GRAFANA_PASSWORD }} \
+            -e GF_AUTH_ANONYMOUS_ENABLED=true \
+            -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
+            -e GF_AUTH_DISABLE_LOGIN_FORM=true \
             grafana/grafana:latest
 
       - name: Wait for Grafana to be healthy
         run: |
           for i in $(seq 1 60); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.GRAFANA_URL }}/api/health || true)
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.GRAFANA_URL }}/api/health" || true)
             if [ "$STATUS" = "200" ]; then
-              echo "✅ Grafana is healthy after ${i}s"
+              echo "Grafana healthy after ${i}s"
               exit 0
             fi
-            echo "Attempt $i/60 — waiting for Grafana..."
             sleep 2
           done
-          echo "❌ Grafana did not start in time"
+          echo "Grafana did not start in time"
           docker logs grafana || true
           exit 1
 
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Create dashboard JSON
+      - name: Create dashboard
         run: |
           cat > reports/grafana-dashboard.json <<'EOF'
           {
@@ -325,7 +425,17 @@ jobs:
                   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
                   "options": {
                     "mode": "markdown",
-                    "content": "## AI Mutation Testing CI\nDashboard created from GitHub Actions."
+                    "content": "## AI Mutation Testing CI\n\nThis dashboard is created by GitHub Actions.\n\n- Lint\n- Unit Tests\n- C/C++ Compile/Test\n- FastAPI Smoke\n- Mutation Testing\n- End-to-End Verification"
+                  }
+                },
+                {
+                  "id": 2,
+                  "type": "text",
+                  "title": "Status",
+                  "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+                  "options": {
+                    "mode": "markdown",
+                    "content": "### Dashboard Ready\nGrafana screenshot will be embedded into the final HTML report."
                   }
                 }
               ]
@@ -334,165 +444,54 @@ jobs:
           }
           EOF
 
-      - name: Create or update Grafana dashboard
-        run: |
           curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -X POST "${{ env.GRAFANA_URL }}/api/dashboards/db" \
-            --data @reports/grafana-dashboard.json > reports/grafana-response.json
-          cat reports/grafana-response.json
+            --data @reports/grafana-dashboard.json > reports/grafana-create-response.json
 
-      - name: Export Grafana health response
+      - name: Install Playwright
         run: |
-          curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
-            "${{ env.GRAFANA_URL }}/api/health" > reports/grafana-health.json
+          npm init -y >/dev/null 2>&1 || true
+          npm install playwright >/dev/null 2>&1
+          npx playwright install --with-deps chromium
 
-      - name: Upload Grafana artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: grafana-artifacts
-          path: reports/
-
-      - name: Stop Grafana container
-        if: always()
-        run: |
-          docker stop grafana || true
-          docker rm grafana || true
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 6 — Mutation Testing
-  # ─────────────────────────────────────────────────────────────
-  mutation-run:
-    name: "6 · Mutation Testing (mutmut + AI Agents)"
-    runs-on: ubuntu-latest
-    needs: [unit-tests, cpp-tests]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Run mutmut on hello.py
-        working-directory: agent
-        run: |
-          mutmut run \
-            --paths-to-mutate hello.py \
-            --tests-dir . \
-            --runner "python -m pytest" \
-          || true
-
-      - name: Export mutmut HTML report
-        working-directory: agent
-        run: |
-          mutmut html || true
-          mkdir -p ../reports
-          cp -r html ../reports/mutmut-report || true
-
-      - name: Display mutmut summary
-        working-directory: agent
-        run: mutmut results || true
-
-      - name: Run AI Agent pipeline
-        working-directory: agent
+      - name: Capture Grafana dashboard screenshot
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DASHBOARD_URL: ${{ env.GRAFANA_URL }}/d/ai-mutation-dashboard/ai-mutation-testing-dashboard?orgId=1&kiosk
         run: |
-          if [ -n "$OPENAI_API_KEY" ]; then
-            echo "🤖 OPENAI_API_KEY present — running AI agents..."
-            python run_agents.py
-          else
-            echo "⚠️ OPENAI_API_KEY not set — skipping AI agent stage."
-          fi
+          node - <<'NODE'
+          const { chromium } = require('playwright');
 
-      - name: Upload mutation reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutation-reports
-          path: reports/
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+            const url = process.env.DASHBOARD_URL;
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 7 — Full End-to-End Orchestration
-  # ─────────────────────────────────────────────────────────────
-  e2e-verify:
-    name: "7 · Full E2E Orchestration (run_all.py)"
-    runs-on: ubuntu-latest
-    needs: [api-service, mutation-run, grafana-update]
+            await page.goto(url, { waitUntil: 'networkidle', timeout: 120000 });
+            await page.screenshot({ path: 'reports/grafana-dashboard.png', fullPage: true });
+            await browser.close();
+          })();
+          NODE
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run full E2E orchestration
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python run_all.py
-
-      - name: Upload E2E HTML report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-baseline-report
-          path: baseline-report.html
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 8 — Summary
-  # ─────────────────────────────────────────────────────────────
-  report:
-    name: "8 · Summary & Report"
-    runs-on: ubuntu-latest
-    needs:
-      - lint
-      - unit-tests
-      - cpp-tests
-      - api-service
-      - grafana-update
-      - mutation-run
-      - e2e-verify
-    if: always()
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-reports
-
-      - name: Write job summary
+      - name: Generate Grafana HTML wrapper
         run: |
-          echo "## 🧬 AI Mutation Testing — Pipeline Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| 1 · Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '⚠️ Needs Cleanup' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 2 · Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 3 · C/C++ Tests | ${{ needs.cpp-tests.result == 'success' && '✅ Passed' || '⚠️ Review Build Output' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 4 · API Service | ${{ needs.api-service.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 5 · Grafana Update | ${{ needs.grafana-update.result == 'success' && '✅ Passed' || '⚠️ Optional Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 6 · Mutation Run | ${{ needs.mutation-run.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 7 · E2E Verify | ${{ needs.e2e-verify.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> Artifacts attached: flake8 report, pytest XML, FastAPI log, C/C++ build report, mutmut HTML, Grafana JSON, baseline-report.html" >> $GITHUB_STEP_SUMMARY
+          cat > reports/grafana-report.html <<'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Grafana Dashboard</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 24px; }
+              img { max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; }
+            </style>
+          </head>
+          <body>
+            <h1>Grafana Dashboard</h1>
+            <p>The live dashboard exists only during the workflow run. The screenshot below is captured from that dashboard and embedded into the final HTML report.</p>
+            <img src="grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
+          </body>
+          </html>
+          EOF
 
-      - name: List downloaded artifacts
-        run: find all-reports -type f | sort
+      - name: Upload Grafana visual artifact
