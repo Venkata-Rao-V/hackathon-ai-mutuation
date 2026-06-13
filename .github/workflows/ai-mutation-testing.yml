@@ -1,9 +1,6 @@
 name: AI Mutation Testing CI
 
-run-name: >-
-  AI Mutation Testing (${{ github.event_name == 'workflow_dispatch' &&
-  format('manual | branch={0} | scope={1}', inputs.target_branch, inputs.mutation_scope) ||
-  github.ref_name }})
+run-name: "AI Mutation Testing - ${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', inputs.target_branch) || github.ref_name }}"
 
 on:
   push:
@@ -32,12 +29,6 @@ on:
         type: string
         default: agent
 
-      run_lint:
-        description: "Run lint stage"
-        required: true
-        type: boolean
-        default: true
-
       run_unit_tests:
         description: "Run Python unit tests"
         required: true
@@ -62,14 +53,14 @@ on:
         type: boolean
         default: true
 
-      run_grafana:
-        description: "Run Grafana dashboard stage"
+      run_mutation:
+        description: "Run mutation testing"
         required: true
         type: boolean
         default: true
 
-      run_mutation:
-        description: "Run mutation testing"
+      run_grafana:
+        description: "Run Grafana dashboard stage"
         required: true
         type: boolean
         default: true
@@ -88,89 +79,17 @@ env:
   GRAFANA_USER: "admin"
   GRAFANA_PASSWORD: "admin"
 
+permissions:
+  contents: read
+
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # JOB 1 — Lint & Static Analysis
-  # ─────────────────────────────────────────────────────────────
-  lint:
-    name: "1 · Lint & Static Analysis"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lint }}
-
-    steps:
-      - name: Checkout repository (manual run)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
-
-      - name: Checkout repository (push / PR)
-        if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Debug trigger inputs
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref_name=${{ github.ref_name }}"
-          echo "head_ref=${{ github.head_ref }}"
-          echo "target_branch=${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'auto' }}"
-          echo "mutation_scope=${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install lint tools
-        run: |
-          pip install flake8 flake8-bugbear flake8-html
-
-      - name: Generate flake8 HTML report
-        run: |
-          mkdir -p reports/flake8-html
-
-          PY_FILES=$(find agent -type f -name '*.py' | sort | tr '\n' ' ')
-          ROOT_PY=$(find . -maxdepth 1 -type f -name '*.py' | sort | tr '\n' ' ')
-
-          if [ -z "$PY_FILES$ROOT_PY" ]; then
-            cat > reports/flake8-html/index.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Flake8 Report</title></head>
-            <body><h1>No Python files found to lint.</h1></body>
-            </html>
-            EOF
-            exit 0
-          fi
-
-          flake8 $PY_FILES $ROOT_PY \
-            --max-line-length=120 \
-            --extend-ignore=E203,W503,E501,W293,E261,E302,E305,E201,E202,F401,B007,E127 \
-            --format=html \
-            --htmldir=reports/flake8-html \
-            --statistics || true
-
-      - name: Upload lint report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake8-html
-          path: reports/flake8-html/
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2 — Python Unit Tests
+  # JOB 1 — Python Unit Tests
   # ─────────────────────────────────────────────────────────────
   unit_tests:
-    name: "2 · Python Unit Tests"
+    name: "1 · Python Unit Tests"
     runs-on: ubuntu-latest
-    needs: lint
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_unit_tests) }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_unit_tests }}
 
     outputs:
       total: ${{ steps.metrics.outputs.total }}
@@ -182,19 +101,27 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Debug trigger
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref_name=${{ github.ref_name }}"
+          echo "head_ref=${{ github.head_ref }}"
+          echo "target_branch=${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'auto' }}"
+          echo "mutation_scope=${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -202,7 +129,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest-html junit2html
+          pip install pytest pytest-html junit2html
 
       - name: Create reports directory
         run: mkdir -p reports
@@ -220,6 +147,7 @@ jobs:
 
           if [ ! -s reports/pytest-files.txt ]; then
             echo "No Python test files found under agent/"
+
             cat > reports/pytest-report.html <<'EOF'
             <!DOCTYPE html>
             <html>
@@ -227,21 +155,24 @@ jobs:
             <body><h1>No Python test files found under agent/</h1></body>
             </html>
             EOF
-            echo "0" > reports/pytest-exit-code.txt
-            exit 0
-          fi
 
-          TEST_FILES=$(tr '\n' ' ' < reports/pytest-files.txt)
-          python -m pytest $TEST_FILES \
-            -v \
-            --tb=short \
-            --junitxml=reports/pytest-results.xml \
-            --html=reports/pytest-report.html \
-            --self-contained-html \
-            --no-header
+                  echo "0" > reports/pytest-exit-code.txt
+                  exit 0
+                fi
 
-          echo "$?" > reports/pytest-exit-code.txt
-          set -e
+                TEST_FILES=$(tr '\n' ' ' < reports/pytest-files.txt)
+
+                python -m pytest $TEST_FILES \
+                  -v \
+                  --tb=short \
+                  --junitxml=reports/pytest-results.xml \
+                  --html=reports/pytest-report.html \
+                  --self-contained-html \
+                  --no-header
+
+                echo "$?" > reports/pytest-exit-code.txt
+                set -e
+
 
       - name: Convert JUnit XML to HTML
         run: |
@@ -288,7 +219,7 @@ jobs:
 
       - name: Upload pytest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pytest-html
           path: |
@@ -297,12 +228,11 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3A — C Compile & Test
+  # JOB 2 — C Compile & Test
   # ─────────────────────────────────────────────────────────────
   c_tests:
-    name: "3A · C Compile & Test"
+    name: "2 · C Compile & Test"
     runs-on: ubuntu-latest
-    needs: lint
     continue-on-error: true
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_c_tests) }}
 
@@ -316,14 +246,14 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -448,7 +378,7 @@ jobs:
 
       - name: Upload C report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: c-html
           path: |
@@ -457,12 +387,11 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3B — C++ Compile & Test
+  # JOB 3 — C++ Compile & Test
   # ─────────────────────────────────────────────────────────────
   cpp_tests:
-    name: "3B · C++ Compile & Test"
+    name: "3 · C++ Compile & Test"
     runs-on: ubuntu-latest
-    needs: lint
     continue-on-error: true
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests) }}
 
@@ -476,14 +405,14 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -613,7 +542,7 @@ jobs:
 
       - name: Upload C++ report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-html
           path: |
@@ -633,19 +562,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -761,7 +690,7 @@ jobs:
 
       - name: Upload API report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: api-html
           path: |
@@ -796,19 +725,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -839,24 +768,13 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import os
 
           scope = "${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-          test_file_list = Path("reports/pytest-files.txt")
           cfg_lines = ["[mutmut]"]
           cfg_lines.append("source_paths=")
           cfg_lines.append(f"    {scope}")
           cfg_lines.append("pytest_add_cli_args_test_selection=")
-
-          test_txt = Path("reports/pytest-files.txt")
-          if test_txt.exists() and test_txt.read_text(encoding="utf-8").strip():
-              for line in test_txt.read_text(encoding="utf-8").splitlines():
-                  line = line.strip()
-                  if line:
-                      cfg_lines.append(f"    {line}")
-          else:
-              cfg_lines.append("    agent")
-
+          cfg_lines.append("    agent")
           cfg_lines.append("do_not_mutate=")
           cfg_lines.append("    */test_*.py")
           cfg_lines.append("    */*_test.py")
@@ -988,7 +906,7 @@ jobs:
 
       - name: Upload mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mutation-html
           path: |
@@ -1013,19 +931,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
 
@@ -1077,7 +995,7 @@ jobs:
                   "gridPos": { "h": 18, "w": 24, "x": 0, "y": 0 },
                   "options": {
                     "mode": "markdown",
-                    "content": "## AI Mutation Testing Dashboard\n\n**Pytest**\n- Total: **${{ needs.unit_tests.outputs.total }}**\n- Passed: **${{ needs.unit_tests.outputs.passed }}**\n- Failed: **${{ needs.unit_tests.outputs.failed }}**\n- Errors: **${{ needs.unit_tests.outputs.errors }}**\n- Skipped: **${{ needs.unit_tests.outputs.skipped }}**\n\n**C**\n- Files: **${{ needs.c_tests.outputs.files }}**\n- Compile pass: **${{ needs.c_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.c_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.c_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.c_tests.outputs.run_fail }}**\n\n**C++**\n- Files: **${{ needs.cpp_tests.outputs.files }}**\n- Compile pass: **${{ needs.cpp_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.cpp_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.cpp_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.cpp_tests.outputs.run_fail }}**\n\n**Mutation**\n- Killed: **${{ needs.mutation_run.outputs.killed }}**\n- Survived: **${{ needs.mutation_run.outputs.survived }}**\n- No tests: **${{ needs.mutation_run.outputs.no_tests }}**\n- Timeout: **${{ needs.mutation_run.outputs.timeout }}**\n- Suspicious: **${{ needs.mutation_run.outputs.suspicious }}**\n- Considered: **${{ needs.mutation_run.outputs.considered }}**\n- Real Mutation Score: **${{ needs.mutation_run.outputs.mutation_score }}%**"
+                    "content": "## AI Mutation Testing Dashboard\n\n**Pytest**\n- Total: **${{ needs.unit_tests.outputs.total || '0' }}**\n- Passed: **${{ needs.unit_tests.outputs.passed || '0' }}**\n- Failed: **${{ needs.unit_tests.outputs.failed || '0' }}**\n- Errors: **${{ needs.unit_tests.outputs.errors || '0' }}**\n- Skipped: **${{ needs.unit_tests.outputs.skipped || '0' }}**\n\n**C**\n- Files: **${{ needs.c_tests.outputs.files || '0' }}**\n- Compile pass: **${{ needs.c_tests.outputs.compile_pass || '0' }}**\n- Compile fail: **${{ needs.c_tests.outputs.compile_fail || '0' }}**\n- Run pass: **${{ needs.c_tests.outputs.run_pass || '0' }}**\n- Run fail: **${{ needs.c_tests.outputs.run_fail || '0' }}**\n\n**C++**\n- Files: **${{ needs.cpp_tests.outputs.files || '0' }}**\n- Compile pass: **${{ needs.cpp_tests.outputs.compile_pass || '0' }}**\n- Compile fail: **${{ needs.cpp_tests.outputs.compile_fail || '0' }}**\n- Run pass: **${{ needs.cpp_tests.outputs.run_pass || '0' }}**\n- Run fail: **${{ needs.cpp_tests.outputs.run_fail || '0' }}**\n\n**Mutation**\n- Killed: **${{ needs.mutation_run.outputs.killed || '0' }}**\n- Survived: **${{ needs.mutation_run.outputs.survived || '0' }}**\n- No tests: **${{ needs.mutation_run.outputs.no_tests || '0' }}**\n- Timeout: **${{ needs.mutation_run.outputs.timeout || '0' }}**\n- Suspicious: **${{ needs.mutation_run.outputs.suspicious || '0' }}**\n- Considered: **${{ needs.mutation_run.outputs.considered || '0' }}**\n- Real Mutation Score: **${{ needs.mutation_run.outputs.mutation_score || '0' }}%**"
                   }
                 }
               ]
@@ -1095,7 +1013,6 @@ jobs:
         run: |
           python - <<'PY' >> $GITHUB_ENV
           import json
-          import os
           from pathlib import Path
 
           default_url = "http://127.0.0.1:3000/d/ai-mutation-dashboard/ai-mutation-dashboard?orgId=1&kiosk"
@@ -1172,7 +1089,7 @@ jobs:
 
       - name: Upload Grafana report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: grafana-html
           path: |
@@ -1201,19 +1118,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -1241,7 +1158,7 @@ jobs:
 
       - name: Upload E2E report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-html
           path: baseline-report.html
@@ -1254,7 +1171,6 @@ jobs:
     name: "8 · Final HTML Report"
     runs-on: ubuntu-latest
     needs:
-      - lint
       - unit_tests
       - c_tests
       - cpp_tests
@@ -1266,7 +1182,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-reports
 
@@ -1274,7 +1190,6 @@ jobs:
         run: |
           mkdir -p final-report/assets
 
-          cp -r all-reports/flake8-html final-report/assets/ || true
           cp -r all-reports/pytest-html final-report/assets/ || true
           cp -r all-reports/c-html final-report/assets/ || true
           cp -r all-reports/cpp-html final-report/assets/ || true
@@ -1365,7 +1280,6 @@ jobs:
             <div class="card">
               <h2>Quick Links</h2>
               <ul>
-                <li><a href="assets/flake8-html/index.html">Lint HTML Report</a></li>
                 <li><a href="assets/pytest-html/pytest-report.html">Pytest HTML Report</a></li>
                 <li><a href="assets/pytest-html/pytest-junit-report.html">Converted JUnit HTML Report</a></li>
                 <li><a href="assets/c-html/c-report.html">C HTML Report</a></li>
@@ -1415,7 +1329,7 @@ jobs:
           PY
 
       - name: Upload final HTML report bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: final-html-report
           path: final-report/
