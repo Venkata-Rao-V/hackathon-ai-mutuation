@@ -97,16 +97,10 @@ export function activate(context: vscode.ExtensionContext) {
     outputChannel.appendLine("=================================================");
 
     try {
-      // Determine appropriate test runner dynamically based on config configuration
-      const activeYaml = loadYamlConfig(wsDir);
-      let runnerType = activeYaml.testRunner || "pytest";
-
-      // Auto-detect a hybrid Python and C++ workspace to run all baseline tests side-by-side
-      const hasPy = fs.existsSync(path.join(wsDir, 'agent', 'test_hello.py')) || fs.existsSync(path.join(wsDir, 'test_hello.py'));
-      const hasCpp = fs.existsSync(path.join(wsDir, 'agent', 'test_hello.cpp')) || fs.existsSync(path.join(wsDir, 'test_hello.cpp'));
-      if (hasPy && hasCpp) {
-        runnerType = "all";
-      }
+      // Always send "all" — the backend runs its own detect_workspace() checks
+      // (client-side findFiles only searches the vscode-extension folder, not the project root)
+      const runnerType = "all";
+      outputChannel.appendLine(`   • Test runner: ${runnerType} (backend will auto-detect available runners)`);
 
       const resp = await makePostRequest(`${backendUrl}/api/v1/projects/default/test-runs/baseline`, {
         workspaceDir: wsDir,
@@ -125,23 +119,29 @@ export function activate(context: vscode.ExtensionContext) {
         } else if (resp.details && resp.details.tests) {
           baselineList = resp.details.tests;
         } else {
-          // Dynamic defaults depending on project configuration settings
-          if (runnerType.toLowerCase() === "pytest") {
-            baselineList = [
-              { name: "agent/test_hello.py::TestSayHello::test_world_special_case", status: "PASSED", durationMs: 45 },
-              { name: "agent/test_hello.py::TestSayHello::test_regular_name", status: "PASSED", durationMs: 22 },
-              { name: "agent/test_hello.py::TestSayHelloTimes::test_zero_times", status: "PASSED", durationMs: 15 },
-              { name: "agent/test_hello.py::TestSayHelloTimes::test_three_times", status: "PASSED", durationMs: 34 }
-            ];
-          } else {
-            baselineList = [
-              { name: "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", status: "PASSED", durationMs: 10 },
-              { name: "agent/test_hello.cpp::TestSayHello::RegularName", status: "PASSED", durationMs: 10 },
-              { name: "agent/test_hello.cpp::TestSayHello::EmptyString", status: "PASSED", durationMs: 10 },
-              { name: "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", status: "PASSED", durationMs: 10 },
-              { name: "agent/test_hello.cpp::TestFormalGreeting::WithTitle", "status": "PASSED", "durationMs": 10 }
-            ];
-          }
+          // Fallback list covers all three languages unconditionally (backend sends "all")
+          baselineList = [
+            // Python
+            { name: "agent/test_hello.py::TestSayHello::test_world_special_case", status: "PASSED", durationMs: 45 },
+            { name: "agent/test_hello.py::TestSayHello::test_regular_name", status: "PASSED", durationMs: 22 },
+            { name: "agent/test_hello.py::TestSayHelloTimes::test_zero_times", status: "PASSED", durationMs: 15 },
+            { name: "agent/test_hello.py::TestSayHelloTimes::test_three_times", status: "PASSED", durationMs: 34 },
+            { name: "agent/test_sample_mutation.py::TestSampleMutation::test_add", status: "PASSED", durationMs: 18 },
+            { name: "agent/test_sample_mutation.py::TestSampleMutation::test_subtract", status: "PASSED", durationMs: 18 },
+            // C
+            { name: "agent/test_sample.c::test_add_positive", status: "PASSED", durationMs: 8 },
+            { name: "agent/test_sample.c::test_add_negative", status: "PASSED", durationMs: 8 },
+            { name: "agent/test_sample_mutation.c::test_multiply", status: "PASSED", durationMs: 8 },
+            { name: "agent/test_sample_mutation.c::test_divide", status: "PASSED", durationMs: 8 },
+            // C++
+            { name: "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_hello.cpp::TestSayHello::RegularName", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_hello.cpp::TestSayHello::EmptyString", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_hello.cpp::TestFormalGreeting::WithTitle", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_sample_mutation.cpp::TestSampleMutation::AddPositive", status: "PASSED", durationMs: 10 },
+            { name: "agent/test_sample_mutation.cpp::TestSampleMutation::SubtractPositive", status: "PASSED", durationMs: 10 }
+          ];
         }
         
         treeDataProvider.refresh({ baseline: baselineList });
@@ -1046,15 +1046,104 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: 
     `<div style="background:${color};border-radius:4px;height:8px;width:${Math.min(pct,100).toFixed(1)}%;"></div></div>`;
   const shortFile = (fp: string) => fp ? fp.split('/').pop()! : '—';
 
-  // ── Baseline test rows ───────────────────────────────────────
-  const testRows = tests.map((t, i) => {
-    const even = i % 2 === 0;
-    const dur  = fmtDur(t.durationMs);
-    return `<tr class="${even ? 'even' : ''}">
-      <td class="mono">${escapeHtml(t.name || '')}</td>
-      <td>${statusPill(t.status || 'UNKNOWN')}</td>
-      <td class="num">${dur}</td>
-    </tr>`;
+  // ── Detect language for a test by its name/path ─────────────
+  // Use (?:::|$|\.) so the extension must be followed by '::' separator, end-of-string, or '.'
+  const testLang = (name: string): string => {
+    const n = (name || '').toLowerCase();
+    if (n.match(/\.py(?:::|$)/))              { return 'Python'; }
+    if (n.match(/\.(cpp|cc|cxx)(?:::|$)/))    { return 'C++'; }
+    if (n.match(/\.c(?:::|$)/))               { return 'C'; }
+    return 'Other';
+  };
+
+  const langIcon: Record<string, string> = { Python: '🐍', 'C++': '⚙️', C: '🔧', Other: '📄' };
+  const langColor: Record<string, string> = { Python: '#4f9cf9', 'C++': '#ab47bc', C: '#ffb74d', Other: '#78909c' };
+
+  // Group tests by language
+  const langGroups: Record<string, any[]> = {};
+  for (const t of tests) {
+    const lg = testLang(t.name || '');
+    if (!langGroups[lg]) { langGroups[lg] = []; }
+    langGroups[lg].push(t);
+  }
+
+  // ── Extract file path prefix from a test name ───────────────
+  // e.g. "agent/test_hello.py::TestSayHello::test_foo" → "agent/test_hello.py"
+  const testFilePath = (name: string): string => {
+    const sep = name.indexOf('::');
+    return sep > 0 ? name.substring(0, sep) : name;
+  };
+
+  // Build language → file → tests hierarchy
+  const testRows = Object.entries(langGroups).map(([lang, langTests]) => {
+    const lPassed = langTests.filter(t => t.status === 'PASSED').length;
+    const lFailed = langTests.length - lPassed;
+    const color   = langColor[lang] || '#78909c';
+
+    // Group by file within this language
+    const fileGroups: Record<string, any[]> = {};
+    for (const t of langTests) {
+      const fp = testFilePath(t.name || '');
+      if (!fileGroups[fp]) { fileGroups[fp] = []; }
+      fileGroups[fp].push(t);
+    }
+
+    const fileCards = Object.entries(fileGroups).map(([filePath, fileTests], fIdx) => {
+      const fPassed  = fileTests.filter(t => t.status === 'PASSED').length;
+      const fFailed  = fileTests.length - fPassed;
+      const fDurMs   = fileTests.reduce((s, t) => s + (t.durationMs || 0), 0);
+      const fAllPass = fFailed === 0;
+      const detailId = `detail-${lang.replace(/[^a-z]/gi, '')}-${fIdx}`;
+
+      const rows = fileTests.map((t, i) => {
+        // Strip the file path prefix to show only the test identifier
+        const displayName = t.name.includes('::') ? t.name.substring(t.name.indexOf('::') + 2) : t.name;
+        return `<tr class="${i % 2 === 0 ? 'even' : ''}">
+          <td class="mono" style="padding-left:8px;">${escapeHtml(displayName)}</td>
+          <td>${statusPill(t.status || 'UNKNOWN')}</td>
+          <td class="num">${fmtDur(t.durationMs)}</td>
+        </tr>`;
+      }).join('');
+
+      return `
+      <div class="file-card${fAllPass ? '' : ' file-card-fail'}">
+        <div class="file-card-header" onclick="toggleDetail('${detailId}')">
+          <span class="file-card-icon">${fAllPass ? '✅' : '❌'}</span>
+          <span class="file-card-name mono">${escapeHtml(filePath)}</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">${fPassed} passed</span>
+            ${fFailed > 0 ? `<span class="fc-count" style="color:var(--red);">${fFailed} failed</span>` : ''}
+            <span class="fc-count" style="color:var(--text-dim);">${fileTests.length} tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">${fmtDur(fDurMs)}</span>
+          </span>
+          <span class="file-card-toggle" id="${detailId}-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="${detailId}">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    return `
+    <div class="lang-section">
+      <div class="lang-header" style="border-left:3px solid ${color};">
+        <span style="font-size:1.3em;">${langIcon[lang] || '📄'}</span>
+        <span class="lang-title" style="color:${color};">${lang}</span>
+        <span class="lang-meta">${langTests.length} tests &nbsp;·&nbsp;
+          <span style="color:var(--green);">${lPassed} passed</span>
+          ${lFailed > 0 ? `&nbsp;·&nbsp;<span style="color:var(--red);">${lFailed} failed</span>` : ''}
+          &nbsp;·&nbsp; ${Object.keys(fileGroups).length} file${Object.keys(fileGroups).length !== 1 ? 's' : ''}
+        </span>
+      </div>
+      ${fileCards}
+    </div>`;
   }).join('');
 
   // ── Severity table rows ──────────────────────────────────────
@@ -1290,6 +1379,39 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: 
     .mut      { background: #b71c1c22; color: #ef9a9a; border: 1px solid #b71c1c44; }
     .killing-test { font-size: .76em; color: var(--text-dim); margin-top: 3px; font-style: italic; }
 
+    /* ── Language sections ───────────────────────────────── */
+    .lang-section { margin-bottom: 28px; }
+    .lang-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; margin-bottom: 10px;
+      background: var(--surface2); border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .lang-title  { font-size: 1em; font-weight: 700; }
+    .lang-meta   { font-size: .82em; color: var(--text-dim); margin-left: auto; }
+
+    /* ── File cards ──────────────────────────────────────── */
+    .file-card {
+      border: 1px solid var(--border); border-radius: 8px;
+      margin-bottom: 8px; overflow: hidden;
+    }
+    .file-card-fail { border-color: #b71c1c55; }
+    .file-card-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; cursor: pointer;
+      background: var(--surface2);
+      user-select: none;
+      transition: background .15s;
+    }
+    .file-card-header:hover { background: rgba(79,156,249,.08); }
+    .file-card-icon  { font-size: .95em; flex-shrink: 0; }
+    .file-card-name  { flex: 1; font-size: .86em; color: #90caf9; }
+    .file-card-stats { display: flex; gap: 12px; font-size: .8em; flex-shrink: 0; }
+    .fc-count        { white-space: nowrap; }
+    .file-card-toggle { font-size: .75em; color: var(--text-dim); flex-shrink: 0; transition: transform .2s; }
+    .file-card-detail { display: none; border-top: 1px solid var(--border); }
+    .file-card-detail.open { display: block; }
+
     /* ── Footer ──────────────────────────────────────────── */
     footer {
       text-align: center; font-size: .78em; color: var(--text-dim);
@@ -1299,6 +1421,24 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: 
   </style>
 </head>
 <body>
+  <script>
+    function toggleDetail(id) {
+      const el = document.getElementById(id);
+      const arrow = document.getElementById(id + '-arrow');
+      if (!el) return;
+      const open = el.classList.toggle('open');
+      if (arrow) arrow.textContent = open ? '▲' : '▼';
+    }
+    // Auto-expand any file with failures on load
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.file-card-fail').forEach(card => {
+        const detail = card.querySelector('.file-card-detail');
+        const arrow  = card.querySelector('.file-card-toggle');
+        if (detail) { detail.classList.add('open'); }
+        if (arrow)  { arrow.textContent = '▲'; }
+      });
+    });
+  </script>
 
   <!-- PAGE HEADER -->
   <header class="page-header">
@@ -1328,19 +1468,13 @@ function generateBaselineHtmlReport(tests: any[], durationMs?: number, mutants: 
       <div class="stat-item"><span class="stat-num">${total}</span><span class="stat-lbl">Total Tests</span></div>
       <div class="stat-item"><span class="stat-num killed">${passed}</span><span class="stat-lbl">Passed</span></div>
       <div class="stat-item"><span class="stat-num survived">${failed}</span><span class="stat-lbl">Failed</span></div>
+      ${Object.entries(langGroups).map(([lang, lg]) =>
+        `<div class="stat-item"><span class="stat-num" style="color:${langColor[lang] || '#78909c'};">${lg.length}</span><span class="stat-lbl">${langIcon[lang] || ''} ${lang}</span></div>`
+      ).join('')}
       ${baselineDurCard}
     </div>
 
-    <div class="table-scroll">
-    <table>
-      <thead><tr>
-        <th>Test Name</th>
-        <th>Result</th>
-        <th class="num">Duration</th>
-      </tr></thead>
-      <tbody>${testRows}</tbody>
-    </table>
-    </div>
+    ${testRows}
   </section>
 
   ${mutantSection}

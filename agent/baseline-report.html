@@ -3,35 +3,813 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Baseline Test Report</title>
+  <title>Mutation Test Report</title>
   <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;padding:24px;background:#1e1e1e;color:#d4d4d4}
-    h1{color:#569cd6;border-bottom:2px solid #569cd6;padding-bottom:8px}
-    .summary{display:flex;gap:16px;margin:16px 0 24px;flex-wrap:wrap}
-    .card{background:#252526;border:1px solid #3c3c3c;border-radius:8px;padding:16px 24px;min-width:120px;text-align:center}
-    .card .value{font-size:2em;font-weight:bold}
-    .card .label{font-size:.85em;opacity:.75;margin-top:4px}
-    .overall{font-size:1.2em;font-weight:bold;margin:8px 0;color:#4caf50}
-    table{width:100%;border-collapse:collapse;margin-top:12px}
-    th{background:#2d2d2d;text-align:left;padding:10px 12px;font-size:.9em;border-bottom:2px solid #3c3c3c}
-    td{padding:9px 12px;border-bottom:1px solid #2d2d2d;font-size:.9em}
-    tr:hover td{background:#2a2a2a}
-    .footer{margin-top:24px;font-size:.8em;opacity:.6}
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --surface2: #21253a;
+      --border:   #2a2f45;
+      --text:     #c9d1e0;
+      --text-dim: #6b7280;
+      --blue:     #4f9cf9;
+      --green:    #4caf50;
+      --red:      #ef5350;
+      --orange:   #ffb74d;
+      --purple:   #ab47bc;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* ── Page shell ──────────────────────────────────────── */
+    .page-header {
+      background: linear-gradient(135deg, #1a1d27 0%, #12162a 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 28px 40px 24px;
+      display: flex;
+      align-items: flex-start;
+      gap: 20px;
+    }
+    .header-logo { font-size: 2.4em; line-height: 1; }
+    .header-title { font-size: 1.6em; font-weight: 700; color: #e2e8f0; letter-spacing: -.3px; }
+    .header-meta  { font-size: .82em; color: var(--text-dim); margin-top: 4px; }
+    .header-badge {
+      margin-left: auto; align-self: center;
+      padding: 6px 18px; border-radius: 24px; font-size: .88em; font-weight: 700; letter-spacing: .5px;
+    }
+    .badge-passed { background: #1b5e20; color: #a5d6a7; border: 1px solid #2e7d32; }
+    .badge-failed { background: #b71c1c; color: #ef9a9a; border: 1px solid #c62828; }
+
+    main { padding: 32px 40px; max-width: 1400px; margin: 0 auto; }
+
+    /* ── Sections ────────────────────────────────────────── */
+    section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin-bottom: 24px;
+    }
+    .section-header {
+      display: flex; align-items: flex-start; gap: 14px;
+      margin-bottom: 20px; padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-icon { font-size: 1.6em; line-height: 1; }
+    .section-title { font-size: 1.08em; font-weight: 600; color: #e2e8f0; }
+    .section-sub   { font-size: .8em; color: var(--text-dim); margin-top: 2px; }
+    .sub-heading {
+      font-size: .9em; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .8px; color: var(--text-dim);
+      margin: 22px 0 10px;
+    }
+
+    /* ── Summary stat strip ──────────────────────────────── */
+    .stat-strip {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-item {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px 20px;
+      display: flex; flex-direction: column; align-items: center; min-width: 100px;
+    }
+    .stat-num  { font-size: 1.7em; font-weight: 700; line-height: 1; }
+    .stat-lbl  { font-size: .78em; color: var(--text-dim); margin-top: 4px; }
+    .killed    { color: var(--green); }
+    .survived  { color: var(--red); }
+    .pending   { color: #78909c; }
+
+    /* ── Mutation score band ──────────────────────────────── */
+    .score-band {
+      display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px 24px; margin-bottom: 22px;
+    }
+    .score-gauge { min-width: 160px; }
+    .score-value { font-size: 2.8em; font-weight: 800; line-height: 1; }
+    .score-label { font-size: .82em; color: var(--text-dim); margin-top: 4px; }
+    .score-stats { display: flex; flex-wrap: wrap; gap: 12px; flex: 1; align-items: center; }
+
+    /* ── Tables ──────────────────────────────────────────── */
+    .table-scroll { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: .86em;
+    }
+    thead tr {
+      background: var(--surface2);
+      border-bottom: 2px solid var(--border);
+    }
+    th {
+      padding: 10px 14px; text-align: left;
+      font-size: .78em; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .6px;
+      color: var(--text-dim); white-space: nowrap;
+    }
+    td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr.even td { background: rgba(255,255,255,.018); }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: rgba(79,156,249,.06); }
+    th.num, td.num { text-align: right; }
+    .mono { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: .85em; }
+    .dim  { color: var(--text-dim); }
+    .line-num { color: var(--text-dim); font-size: .85em; }
+
+    /* ── Code chips ──────────────────────────────────────── */
+    code { border-radius: 4px; padding: 1px 6px; font-size: .84em; font-family: "SF Mono","Fira Code",Consolas,monospace; }
+    .op-type  { background: #1a237e22; color: #90caf9; border: 1px solid #1a237e55; }
+    .orig     { background: #1b5e2022; color: #a5d6a7; border: 1px solid #1b5e2044; }
+    .mut      { background: #b71c1c22; color: #ef9a9a; border: 1px solid #b71c1c44; }
+    .killing-test { font-size: .76em; color: var(--text-dim); margin-top: 3px; font-style: italic; }
+
+    /* ── Language sections ───────────────────────────────── */
+    .lang-section { margin-bottom: 28px; }
+    .lang-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; margin-bottom: 10px;
+      background: var(--surface2); border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .lang-title  { font-size: 1em; font-weight: 700; }
+    .lang-meta   { font-size: .82em; color: var(--text-dim); margin-left: auto; }
+
+    /* ── File cards ──────────────────────────────────────── */
+    .file-card {
+      border: 1px solid var(--border); border-radius: 8px;
+      margin-bottom: 8px; overflow: hidden;
+    }
+    .file-card-fail { border-color: #b71c1c55; }
+    .file-card-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; cursor: pointer;
+      background: var(--surface2);
+      user-select: none;
+      transition: background .15s;
+    }
+    .file-card-header:hover { background: rgba(79,156,249,.08); }
+    .file-card-icon  { font-size: .95em; flex-shrink: 0; }
+    .file-card-name  { flex: 1; font-size: .86em; color: #90caf9; }
+    .file-card-stats { display: flex; gap: 12px; font-size: .8em; flex-shrink: 0; }
+    .fc-count        { white-space: nowrap; }
+    .file-card-toggle { font-size: .75em; color: var(--text-dim); flex-shrink: 0; transition: transform .2s; }
+    .file-card-detail { display: none; border-top: 1px solid var(--border); }
+    .file-card-detail.open { display: block; }
+
+    /* ── Footer ──────────────────────────────────────────── */
+    footer {
+      text-align: center; font-size: .78em; color: var(--text-dim);
+      padding: 20px 40px 32px; border-top: 1px solid var(--border);
+      margin-top: 8px;
+    }
   </style>
 </head>
 <body>
-  <h1>🧪 Baseline Test Report</h1>
-  <div class="overall">Overall: PASSED</div>
-  <div class="summary">
-    <div class="card"><div class="value">83</div><div class="label">Total</div></div>
-    <div class="card"><div class="value" style="color:#4caf50;">83</div><div class="label">Passed</div></div>
-    <div class="card"><div class="value" style="color:#f44336;">0</div><div class="label">Failed</div></div>
-    <div class="card"><div class="value" style="color:#569cd6;">16449ms</div><div class="label">Duration</div></div>
-  </div>
-  <table>
-    <thead><tr><th>Test Name</th><th>Status</th><th>Duration</th></tr></thead>
-    <tbody><tr><td>test_hello.py::TestSayHello::test_world_special_case</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_regular_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_lowercase_world_is_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_uppercase_world_is_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_empty_string</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_numeric_string</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_special_characters</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_whitespace_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_name_with_spaces</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_single_char</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_unicode_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_return_type_is_str</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_world_result_contains_world</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_non_world_result_contains_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_greeting_starts_with_hello</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHello::test_greeting_ends_with_exclamation</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_zero_times_returns_empty</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_negative_times_returns_empty</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_one_time</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_three_times</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_length_matches_times</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_world_special_case_repeated</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_returns_list</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_all_items_are_strings</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestSayHelloTimes::test_minus_one_returns_empty</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_empty_list_returns_empty</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_single_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_multiple_names</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_world_in_list_gets_special_greeting</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_length_matches_input</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_order_preserved</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_returns_list</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_empty_string_in_list</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestGreetAll::test_duplicate_names</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_empty_name_returns_stranger</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_name_only</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_name_with_title</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_name_with_mr_title</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_no_title_no_dot_prefix</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_result_ends_with_period</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_stranger_result_ends_with_exclamation</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_title_appears_before_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestFormalGreeting::test_empty_title_ignored</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_empty_name_returns_hello_shout</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_regular_name_uppercased</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_world_uppercased</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_result_is_all_uppercase</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_lowercase_name_uppercased</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestShoutHello::test_return_type_is_str</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_empty_list_returns_zero</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_all_valid_names</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_empty_strings_not_counted</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_all_empty_strings</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_single_valid_name</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_single_empty_string</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_returns_int</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_world_counted</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestCountHellos::test_mixed_valid_and_empty</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_world_is_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_regular_name_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_empty_string_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_lowercase_world_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_uppercase_world_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_world_with_space_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_returns_bool</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.py::TestIsSpecialName::test_numeric_not_special</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_parser_cpp_templates.py::test_cpp_template_angles_are_not_treated_as_relational_operators</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_sample_mutation.py::test_arithmetic_substitution_add_path</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_sample_mutation.py::test_arithmetic_substitution_subtract_path</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_sample_mutation.py::test_relational_boundary_low_mid_high</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_sample_mutation.py::test_boolean_inversion_truth_table</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_sample_mutation.py::test_return_value_stripping_behavior</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>15ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr><tr><td>test_hello.cpp::]</td><td style="color:#4caf50;font-weight:bold;">✅ PASSED</td><td>10ms</td></tr></tbody>
-  </table>
-  <div class="footer">Generated by AI Mutation Testing Extension &mdash; 6/12/2026, 1:02:00 PM</div>
+  <script>
+    function toggleDetail(id) {
+      const el = document.getElementById(id);
+      const arrow = document.getElementById(id + '-arrow');
+      if (!el) return;
+      const open = el.classList.toggle('open');
+      if (arrow) arrow.textContent = open ? '▲' : '▼';
+    }
+    // Auto-expand any file with failures on load
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.file-card-fail').forEach(card => {
+        const detail = card.querySelector('.file-card-detail');
+        const arrow  = card.querySelector('.file-card-toggle');
+        if (detail) { detail.classList.add('open'); }
+        if (arrow)  { arrow.textContent = '▲'; }
+      });
+    });
+  </script>
+
+  <!-- PAGE HEADER -->
+  <header class="page-header">
+    <div class="header-logo">🧬</div>
+    <div>
+      <div class="header-title">Mutation Test Report</div>
+      <div class="header-meta">Generated&nbsp;&nbsp;6/13/2026, 11:24:25 PM &nbsp;&middot;&nbsp; <span style="font-family:monospace;">2026-06-13T17:54:25.441Z</span></div>
+    </div>
+    <span class="header-badge badge-passed">
+      Baseline PASSED
+    </span>
+  </header>
+
+  <main>
+
+  <!-- ═══ BASELINE SUMMARY ══════════════════════════════════ -->
+  <section>
+    <div class="section-header">
+      <span class="section-icon">🧪</span>
+      <div>
+        <div class="section-title">Baseline Test Suite</div>
+        <div class="section-sub">Ground truth — all tests must pass before mutation analysis</div>
+      </div>
+    </div>
+
+    <div class="stat-strip">
+      <div class="stat-item"><span class="stat-num">95</span><span class="stat-lbl">Total Tests</span></div>
+      <div class="stat-item"><span class="stat-num killed">95</span><span class="stat-lbl">Passed</span></div>
+      <div class="stat-item"><span class="stat-num survived">0</span><span class="stat-lbl">Failed</span></div>
+      <div class="stat-item"><span class="stat-num" style="color:#4f9cf9;">73</span><span class="stat-lbl">🐍 Python</span></div><div class="stat-item"><span class="stat-num" style="color:#ab47bc;">15</span><span class="stat-lbl">⚙️ C++</span></div><div class="stat-item"><span class="stat-num" style="color:#ffb74d;">7</span><span class="stat-lbl">🔧 C</span></div>
+      <div class="stat-item"><span class="stat-num" style="color:#64b5f6;">8,493 ms</span><span class="stat-lbl">Duration</span></div>
+    </div>
+
+    
+    <div class="lang-section">
+      <div class="lang-header" style="border-left:3px solid #4f9cf9;">
+        <span style="font-size:1.3em;">🐍</span>
+        <span class="lang-title" style="color:#4f9cf9;">Python</span>
+        <span class="lang-meta">73 tests &nbsp;·&nbsp;
+          <span style="color:var(--green);">73 passed</span>
+          
+          &nbsp;·&nbsp; 3 files
+        </span>
+      </div>
+      
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-Python-0')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_hello.py</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">67 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">67 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">1,005 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-Python-0-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-Python-0">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_world_special_case</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_regular_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_lowercase_world_is_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_uppercase_world_is_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_empty_string</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_numeric_string</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_special_characters</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_whitespace_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_name_with_spaces</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_single_char</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_unicode_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_return_type_is_str</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_world_result_contains_world</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_non_world_result_contains_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_greeting_starts_with_hello</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHello::test_greeting_ends_with_exclamation</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_zero_times_returns_empty</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_negative_times_returns_empty</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_one_time</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_three_times</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_length_matches_times</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_world_special_case_repeated</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_returns_list</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_all_items_are_strings</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestSayHelloTimes::test_minus_one_returns_empty</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_empty_list_returns_empty</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_single_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_multiple_names</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_world_in_list_gets_special_greeting</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_length_matches_input</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_order_preserved</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_returns_list</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_empty_string_in_list</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestGreetAll::test_duplicate_names</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_empty_name_returns_stranger</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_name_only</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_name_with_title</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_name_with_mr_title</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_no_title_no_dot_prefix</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_result_ends_with_period</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_stranger_result_ends_with_exclamation</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_title_appears_before_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestFormalGreeting::test_empty_title_ignored</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_empty_name_returns_hello_shout</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_regular_name_uppercased</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_world_uppercased</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_result_is_all_uppercase</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_lowercase_name_uppercased</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestShoutHello::test_return_type_is_str</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_empty_list_returns_zero</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_all_valid_names</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_empty_strings_not_counted</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_all_empty_strings</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_single_valid_name</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_single_empty_string</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_returns_int</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_world_counted</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestCountHellos::test_mixed_valid_and_empty</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_world_is_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_regular_name_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_empty_string_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_lowercase_world_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_uppercase_world_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_world_with_space_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_returns_bool</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">TestIsSpecialName::test_numeric_not_special</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_kill_survivor_line_15</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-Python-1')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_parser_cpp_templates.py</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">1 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">1 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">15 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-Python-1-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-Python-1">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_cpp_template_angles_are_not_treated_as_relational_operators</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-Python-2')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_sample_mutation.py</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">5 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">5 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">75 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-Python-2-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-Python-2">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_arithmetic_substitution_add_path</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">test_arithmetic_substitution_subtract_path</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_relational_boundary_low_mid_high</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">test_boolean_inversion_truth_table</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_return_value_stripping_behavior</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">15 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="lang-section">
+      <div class="lang-header" style="border-left:3px solid #ab47bc;">
+        <span style="font-size:1.3em;">⚙️</span>
+        <span class="lang-title" style="color:#ab47bc;">C++</span>
+        <span class="lang-meta">15 tests &nbsp;·&nbsp;
+          <span style="color:var(--green);">15 passed</span>
+          
+          &nbsp;·&nbsp; 2 files
+        </span>
+      </div>
+      
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-C-0')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_hello.cpp</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">11 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">11 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">110 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-C-0-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-C-0">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-C-1')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_sample_mutation.cpp</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">4 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">4 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">40 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-C-1-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-C-1">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">]</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="lang-section">
+      <div class="lang-header" style="border-left:3px solid #ffb74d;">
+        <span style="font-size:1.3em;">🔧</span>
+        <span class="lang-title" style="color:#ffb74d;">C</span>
+        <span class="lang-meta">7 tests &nbsp;·&nbsp;
+          <span style="color:var(--green);">7 passed</span>
+          
+          &nbsp;·&nbsp; 2 files
+        </span>
+      </div>
+      
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-C-0')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">test_sample.c</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">3 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">3 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">30 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-C-0-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-C-0">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_add_or_subtract</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">test_clamp_to_range</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_is_eligible</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+      <div class="file-card">
+        <div class="file-card-header" onclick="toggleDetail('detail-C-1')">
+          <span class="file-card-icon">✅</span>
+          <span class="file-card-name mono">agent/test_sample_mutation.c</span>
+          <span class="file-card-stats">
+            <span class="fc-count" style="color:var(--green);">4 passed</span>
+            
+            <span class="fc-count" style="color:var(--text-dim);">4 tests</span>
+            <span class="fc-count" style="color:var(--text-dim);">40 ms</span>
+          </span>
+          <span class="file-card-toggle" id="detail-C-1-arrow">▼</span>
+        </div>
+        <div class="file-card-detail" id="detail-C-1">
+          <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Test</th><th>Result</th><th class="num">Duration</th>
+            </tr></thead>
+            <tbody><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_arithmetic_substitution_c</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">test_relational_boundary_c</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="even">
+          <td class="mono" style="padding-left:8px;">test_boolean_inversion_c</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr><tr class="">
+          <td class="mono" style="padding-left:8px;">test_return_value_stripping_c</td>
+          <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:.78em;font-weight:700;background:#1b5e20;color:#a5d6a7;">PASSED</span></td>
+          <td class="num">10 ms</td>
+        </tr></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  
+
+  </main>
+
+  <footer>
+    AI Mutation Testing Extension &nbsp;&middot;&nbsp; Report generated 6/13/2026, 11:24:25 PM
+  </footer>
 </body>
 </html>

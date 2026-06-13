@@ -219,33 +219,63 @@ def execute_baseline(projectId: str, payload: BaselineRequest):
     total_tests = 0
     duration_ms = 0
     overall_status = "TESTS_PASSED"
-    
-    for lang, runner in runners_to_run:
-        temp_sandbox = os.path.join(tempfile_dir_root(), f"baseline-{lang}-{uuid.uuid4().hex[:8]}")
-        if lang == "cpp":
-            primary_file = os.path.join(payload.workspaceDir, "agent", "hello.cpp")
-            if not os.path.exists(primary_file):
-                primary_file = os.path.join(payload.workspaceDir, "hello.cpp")
-            if not os.path.exists(primary_file):
-                primary_file = os.path.join(payload.workspaceDir, "agent", "hello.c")
-            if not os.path.exists(primary_file):
-                primary_file = os.path.join(payload.workspaceDir, "hello.c")
-        else:
-            primary_file = os.path.join(payload.workspaceDir, "agent", "hello.py")
 
-        res_lang = runner.execute_suite(
-            workspace_root=payload.workspaceDir,
-            sandbox_dir=temp_sandbox,
-            target_file=primary_file,
-            mutated_code=None
-        )
-        
-        if res_lang.get("overallStatus") != "TESTS_PASSED":
-            overall_status = "TESTS_FAILED"
-            
-        total_tests += res_lang.get("totalTests", 0)
-        duration_ms += res_lang.get("durationMs", 0)
-        tests_merged.extend(res_lang.get("tests", []))
+    def _find_c_source_files(workspace_dir: str):
+        """Return all non-test C/C++ source files under agent/ and workspace root."""
+        C_EXTS = ('.c', '.cpp', '.cc', '.cxx')
+        found = []
+        for search_dir in [os.path.join(workspace_dir, "agent"), workspace_dir]:
+            if not os.path.isdir(search_dir):
+                continue
+            for fname in os.listdir(search_dir):
+                base, ext = os.path.splitext(fname)
+                if ext.lower() not in C_EXTS:
+                    continue
+                # Skip test files and header-only files
+                if fname.startswith("test_") or fname.endswith("_test" + ext):
+                    continue
+                if ext.lower() in ('.h', '.hpp'):
+                    continue
+                full = os.path.join(search_dir, fname)
+                if os.path.isfile(full):
+                    found.append(full)
+        return found
+
+    for lang, runner in runners_to_run:
+        if lang == "cpp":
+            # Find every C/C++ source file and run its paired test
+            c_sources = _find_c_source_files(payload.workspaceDir)
+            if not c_sources:
+                # hard fallback
+                c_sources = [os.path.join(payload.workspaceDir, "agent", "hello.cpp")]
+            for primary_file in c_sources:
+                temp_sandbox = os.path.join(tempfile_dir_root(), f"baseline-cpp-{uuid.uuid4().hex[:8]}")
+                res_lang = runner.execute_suite(
+                    workspace_root=payload.workspaceDir,
+                    sandbox_dir=temp_sandbox,
+                    target_file=primary_file,
+                    mutated_code=None
+                )
+                if res_lang.get("overallStatus") != "TESTS_PASSED":
+                    overall_status = "TESTS_FAILED"
+                total_tests += res_lang.get("totalTests", 0)
+                duration_ms += res_lang.get("durationMs", 0)
+                tests_merged.extend(res_lang.get("tests", []))
+        else:
+            # Python: pytest auto-discovers all test_*.py — one run covers everything
+            primary_file = os.path.join(payload.workspaceDir, "agent", "hello.py")
+            temp_sandbox = os.path.join(tempfile_dir_root(), f"baseline-python-{uuid.uuid4().hex[:8]}")
+            res_lang = runner.execute_suite(
+                workspace_root=payload.workspaceDir,
+                sandbox_dir=temp_sandbox,
+                target_file=primary_file,
+                mutated_code=None
+            )
+            if res_lang.get("overallStatus") != "TESTS_PASSED":
+                overall_status = "TESTS_FAILED"
+            total_tests += res_lang.get("totalTests", 0)
+            duration_ms += res_lang.get("durationMs", 0)
+            tests_merged.extend(res_lang.get("tests", []))
 
     final_res = {
         "overallStatus": overall_status,

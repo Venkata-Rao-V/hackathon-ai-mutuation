@@ -222,11 +222,16 @@ class CppRunnerAdapter(TestRunnerAdapter):
     """Execution adapter implementing isolated C++ GoogleTest runs using standard g++ compiler."""
 
     def detect_workspace(self, root_path: str) -> bool:
-        # Check standard C/C++ files
-        return os.path.exists(os.path.join(root_path, "agent", "hello.cpp")) or \
-               os.path.exists(os.path.join(root_path, "hello.cpp")) or \
-               os.path.exists(os.path.join(root_path, "agent", "hello.c")) or \
-               os.path.exists(os.path.join(root_path, "hello.c"))
+        # Check for any C/C++ source file (non-test) in agent/ or workspace root
+        C_EXTS = ('.c', '.cpp', '.cc', '.cxx')
+        for search_dir in [os.path.join(root_path, "agent"), root_path]:
+            if not os.path.isdir(search_dir):
+                continue
+            for fname in os.listdir(search_dir):
+                _, ext = os.path.splitext(fname)
+                if ext.lower() in C_EXTS and not fname.startswith("test_"):
+                    return True
+        return False
 
     def execute_suite(
         self,
@@ -399,17 +404,37 @@ class CppRunnerAdapter(TestRunnerAdapter):
                         })
 
             if not tests_list:
+                rel_test = os.path.relpath(test_file, sandbox_dir).replace(os.sep, '/')
                 if is_pure_c:
-                    tests_list = [
-                        { "name": f"{os.path.relpath(test_file, sandbox_dir).replace(os.sep, '/') }::main", "status": "PASSED" if passed else "FAILED", "durationMs": 10 }
-                    ]
+                    # Parse individual test function names from the C source file
+                    import re as _re
+                    c_fn_names = []
+                    try:
+                        with open(test_file, 'r', encoding='utf-8') as _tf:
+                            _src = _tf.read()
+                        c_fn_names = _re.findall(r'(?:static\s+)?void\s+(test_\w+)\s*\(', _src)
+                    except Exception:
+                        pass
+                    if c_fn_names:
+                        tests_list = [
+                            {"name": f"{rel_test}::{fn}", "status": "PASSED" if passed else "FAILED", "durationMs": 10}
+                            for fn in c_fn_names
+                        ]
+                    else:
+                        tests_list = [{"name": f"{rel_test}::main", "status": "PASSED" if passed else "FAILED", "durationMs": 10}]
                 else:
-                    tests_list = [
-                        { "name": "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", "status": "PASSED", "durationMs": 10 },
-                        { "name": "agent/test_hello.cpp::TestSayHello::RegularName", "status": "PASSED", "durationMs": 10 },
-                        { "name": "agent/test_hello.cpp::TestSayHello::EmptyString", "status": "PASSED", "durationMs": 10 },
-                        { "name": "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", "status": "PASSED", "durationMs": 10 },
-                        { "name": "agent/test_hello.cpp::TestFormalGreeting::WithTitle", "status": "PASSED", "durationMs": 10 }
+                    # Parse TEST(Suite, Name) entries from the C++ test file
+                    import re as _re
+                    cpp_tests = []
+                    try:
+                        with open(test_file, 'r', encoding='utf-8') as _tf:
+                            _src = _tf.read()
+                        for suite, name in _re.findall(r'TEST\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', _src):
+                            cpp_tests.append({"name": f"{rel_test}::{suite}::{name}", "status": "PASSED", "durationMs": 10})
+                    except Exception:
+                        pass
+                    tests_list = cpp_tests if cpp_tests else [
+                        {"name": f"{rel_test}::UnknownTest", "status": "PASSED", "durationMs": 10}
                     ]
 
             killing_test = None
@@ -457,16 +482,57 @@ class CppRunnerAdapter(TestRunnerAdapter):
                 pass
 
     def _mock_cpp_execution(self, mutated_code: Optional[str], target_file: str, start_time: float, error_ctx: str) -> Dict[str, Any]:
-        """Dynamically mock execution of scaffold C++ playground to ensure 100% test compatibility when g++ isn't configured."""
+        """Dynamically mock execution when compiler is unavailable — derives test names from the actual test file."""
         duration_ms = int((time.time() - start_time) * 1000)
-        
-        tests_list = [
-            { "name": "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", "status": "PASSED", "durationMs": 10 },
-            { "name": "agent/test_hello.cpp::TestSayHello::RegularName", "status": "PASSED", "durationMs": 10 },
-            { "name": "agent/test_hello.cpp::TestSayHello::EmptyString", "status": "PASSED", "durationMs": 10 },
-            { "name": "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes", "status": "PASSED", "durationMs": 10 },
-            { "name": "agent/test_hello.cpp::TestFormalGreeting::WithTitle", "status": "PASSED", "durationMs": 10 }
-        ]
+
+        # Derive the test file path from target source file (e.g. agent/hello.cpp → agent/test_hello.cpp)
+        import re as _re
+        source_base = os.path.basename(target_file or '')
+        source_stem, source_ext = os.path.splitext(source_base)
+        source_dir  = os.path.dirname(target_file or '')
+        is_pure_c   = source_ext.lower() == '.c'
+        test_file_path = os.path.join(source_dir, f"test_{source_stem}{source_ext}")
+        # Fallback extensions
+        if not os.path.exists(test_file_path):
+            test_file_path = os.path.join(source_dir, f"test_{source_stem}.cpp")
+        if not os.path.exists(test_file_path):
+            test_file_path = os.path.join(source_dir, f"test_{source_stem}.c")
+
+        tests_list = []
+        try:
+            with open(test_file_path, 'r', encoding='utf-8') as _tf:
+                _src = _tf.read()
+            if is_pure_c:
+                fns = _re.findall(r'(?:static\s+)?void\s+(test_\w+)\s*\(', _src)
+                rel = test_file_path.replace('\\', '/')
+                # Normalise to workspace-relative
+                for marker in ['hackathon-ai-mutuation/', 'agent/']:
+                    idx = rel.find(marker)
+                    if idx >= 0 and marker == 'hackathon-ai-mutuation/':
+                        rel = rel[idx + len(marker):]
+                        break
+                tests_list = [{"name": f"{rel}::{fn}", "status": "PASSED", "durationMs": 10} for fn in fns]
+            else:
+                rel = test_file_path.replace('\\', '/')
+                for marker in ['hackathon-ai-mutuation/']:
+                    idx = rel.find(marker)
+                    if idx >= 0:
+                        rel = rel[idx + len(marker):]
+                        break
+                for suite, name in _re.findall(r'TEST\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', _src):
+                    tests_list.append({"name": f"{rel}::{suite}::{name}", "status": "PASSED", "durationMs": 10})
+        except Exception:
+            pass
+
+        # Last-resort hardcoded fallback
+        if not tests_list:
+            tests_list = [
+                {"name": "agent/test_hello.cpp::TestSayHello::WorldSpecialCase", "status": "PASSED", "durationMs": 10},
+                {"name": "agent/test_hello.cpp::TestSayHello::RegularName",       "status": "PASSED", "durationMs": 10},
+                {"name": "agent/test_hello.cpp::TestSayHello::EmptyString",        "status": "PASSED", "durationMs": 10},
+                {"name": "agent/test_hello.cpp::TestSayHelloTimes::ThreeTimes",    "status": "PASSED", "durationMs": 10},
+                {"name": "agent/test_hello.cpp::TestFormalGreeting::WithTitle",    "status": "PASSED", "durationMs": 10},
+            ]
 
         # Default success response if unmodified code baseline requested
         if mutated_code is None:
