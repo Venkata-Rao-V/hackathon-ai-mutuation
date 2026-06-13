@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Canonical python / pip symlinks
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
     && python3 -m pip install --upgrade pip setuptools wheel
 
 # ── Node.js 20 (LTS) ─────────────────────────────────────────

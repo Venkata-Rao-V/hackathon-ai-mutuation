@@ -2,9 +2,13 @@
 // AI Mutation Testing — Dev Container Configuration
 // Python 3.11 + Node 20 + g++ are provided by the custom Dockerfile.
 // Lifecycle hooks:
-//   onCreateCommand   – builds the .vsix (once, after container is created)
-//   postStartCommand  – starts the FastAPI core service in the background
-//   postAttachCommand – installs the built .vsix into the running VS Code instance
+//   postStartCommand  – (re)builds the .vsix on EVERY container start,
+//                       then starts the FastAPI core service.
+//                       Uses Dockerfile-baked node_modules cache so the
+//                       first build is fast even without network access.
+//   postAttachCommand – waits for the .vsix to be ready, then installs it
+//                       into the running VS Code Server instance so the
+//                       mutation commands are immediately available.
 // ────────────────────────────────────────────────────────────────
 {
   "name": "AI Mutation Testing",
@@ -24,7 +28,7 @@
         "eamodio.gitlens"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python3",
+        "python.defaultInterpreterPath": "/usr/bin/python3",
         "mutationTesting.coreServiceUrl": "http://localhost:8000",
         "mutationTesting.grafanaUrl": "http://localhost:3000",
         "terminal.integrated.defaultProfile.linux": "bash",
@@ -35,17 +39,17 @@
 
   // ── Lifecycle hooks ──────────────────────────────────────────
 
-  // Runs once when the container is first created:
-  //   • Sync npm deps, compile TypeScript, pack .vsix
-  "onCreateCommand": "bash /workspace/.devcontainer/build-extension.sh",
-
-  // Runs every time the container starts:
-  //   • Starts the FastAPI core mutation service on port 8000
-  "postStartCommand": "bash /workspace/.devcontainer/start-core-service.sh",
+  // Runs on EVERY container start:
+  //   0. Strips Windows CRLF line-endings from all .sh scripts (safe no-op on LF files).
+  //   1. (Re)builds the extension .vsix – uses Dockerfile node_modules cache
+  //      so it's fast; falls back to npm ci if cache is missing.
+  //   2. Starts the FastAPI core mutation service on port 8000.
+  "postStartCommand": "find /workspace/.devcontainer -name '*.sh' -exec sed -i 's/\r$//' {} + && bash /workspace/.devcontainer/build-extension.sh && bash /workspace/.devcontainer/start-core-service.sh",
 
   // Runs every time VS Code attaches to the container:
-  //   • Installs the packed .vsix into the VS Code Server instance
-  "postAttachCommand": "code --install-extension /workspace/vscode-extension/ai-mutation-testing.vsix --force",
+  //   • Strips CRLF (defensive – postStartCommand may still be running on first attach),
+  //     waits for the .vsix, then installs it into VS Code.
+  "postAttachCommand": "sed -i 's/\r$//' /workspace/.devcontainer/install-extension.sh && bash /workspace/.devcontainer/install-extension.sh",
 
   // ── Environment ────────────────────────────────────────────
 
