@@ -1,289 +1,383 @@
-name: AI Mutation Testing CI
+name: AI Mutation Dashboard CI
 
 on:
   push:
     branches:
       - main
-      - develop
-      - feature/**
-  pull_request:
-    branches:
-      - main
-      - develop
   workflow_dispatch:
+    inputs:
+      mutate_target:
+        description: "Python file inside agent/ to mutate (example: hello.py)"
+        required: false
+        default: "hello.py"
+      python_test_glob:
+        description: "Glob for pytest files inside agent/ (example: test_*.py)"
+        required: false
+        default: "test_*.py"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PYTHON_VERSION: "3.11"
-  SERVICE_URL: "http://127.0.0.1:8000"
   GRAFANA_URL: "http://127.0.0.1:3000"
   GRAFANA_USER: "admin"
   GRAFANA_PASSWORD: "admin"
 
 jobs:
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 1 — Lint & Static Analysis (non-blocking)
-  # ─────────────────────────────────────────────────────────────
-  lint:
-    name: "1 · Lint & Static Analysis"
+  analyze-and-dashboard:
+    name: "Analyze · Pytest · C/C++ · Mutmut · Grafana · HTML"
     runs-on: ubuntu-latest
-    continue-on-error: true
+
+    env:
+      MUTATE_TARGET: ${{ github.event.inputs.mutate_target || 'hello.py' }}
+      PYTHON_TEST_GLOB: ${{ github.event.inputs.python_test_glob || 'test_*.py' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Debug trigger
+      - name: Show trigger info
         run: |
-          echo "Branch: ${{ github.ref }}"
           echo "Event: ${{ github.event_name }}"
+          echo "Ref:   ${{ github.ref }}"
+          echo "MUTATE_TARGET=${MUTATE_TARGET}"
+          echo "PYTHON_TEST_GLOB=${PYTHON_TEST_GLOB}"
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install lint tools
-        run: pip install flake8 flake8-bugbear
-
-      - name: Run flake8 (report only, non-blocking)
-        run: |
-          mkdir -p reports
-          flake8 agent/services/ agent/*.py run_all.py \
-            --max-line-length=120 \
-            --extend-ignore=E203,W503,E501,W293,E261,E302,E305,E201,E202,F401,B007,E127 \
-            --statistics | tee reports/flake8-report.txt || true
-
-      - name: Upload lint report
-        if: always()
-        uses: actions/upload-artifact@v6
+      - name: Set up Node.js for Playwright screenshot
+        uses: actions/setup-node@v6
         with:
-          name: flake8-report
-          path: reports/flake8-report.txt
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2 — Python Unit Tests
-  # ─────────────────────────────────────────────────────────────
-  unit-tests:
-    name: "2 · Python Unit Tests"
-    runs-on: ubuntu-latest
-    needs: lint
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          node-version: "24"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
-
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Run pytest
-        working-directory: agent
         run: |
-          pytest \
-            test_hello.py \
-            test_sample_mutation.py \
-            -v \
-            --tb=short \
-            --junitxml=../reports/pytest-results.xml \
-            --no-header
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-html junit2html mutmut lxml
 
-      - name: Upload pytest results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: pytest-results
-          path: reports/pytest-results.xml
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 3 — C / C++ Compile & Test (safe for files without main)
-  # ─────────────────────────────────────────────────────────────
-  cpp-tests:
-    name: "3 · C / C++ Compile & Test"
-    runs-on: ubuntu-latest
-    needs: lint
-    continue-on-error: true
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install build tools
+      - name: Install build and browser dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y g++ gcc make
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-      - name: Create reports directory
-        run: mkdir -p reports
+      - name: Prepare folders
+        run: |
+          mkdir -p reports
+          mkdir -p site
+          mkdir -p temp
 
-      - name: Compile C/C++ sources safely
-        working-directory: agent
+      # ---------------------------------------------------------
+      # 1) Discover and run pytest from agent/
+      # ---------------------------------------------------------
+      - name: Discover pytest files in agent/
         shell: bash
         run: |
-          set -u
+          find agent -maxdepth 1 -type f \( -name "${PYTHON_TEST_GLOB}" -o -name "*_test.py" \) | sort > reports/pytest-files.txt || true
+          echo "Discovered pytest files:"
+          cat reports/pytest-files.txt || true
 
-          compile_cpp() {
-            local file="$1"
-            if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file"
-              return 0
-            fi
+          if [ ! -s reports/pytest-files.txt ]; then
+            echo "No pytest files found in agent/"
+            exit 1
+          fi
 
-            local base="${file%.*}"
-            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..."
-              g++ -std=c++17 -Wall -o "$base" "$file"
-              echo "Running $base..."
-              "./$base"
-            else
-              echo "No main() found in $file — compiling as object only..."
-              g++ -std=c++17 -Wall -c "$file" -o "${base}.o"
-            fi
+      - name: Run pytest on discovered files
+        shell: bash
+        run: |
+          set +e
+          PYTEST_FILES=$(tr '\n' ' ' < reports/pytest-files.txt)
+          python -m pytest ${PYTEST_FILES} \
+            -v \
+            --tb=short \
+            --junitxml=reports/pytest-results.xml \
+            --html=reports/pytest-report.html \
+            --self-contained-html
+          PYTEST_EXIT=$?
+          set -e
+
+          echo "PYTEST_EXIT=$PYTEST_EXIT" >> $GITHUB_ENV
+          echo "$PYTEST_EXIT" > reports/pytest-exit-code.txt
+
+      - name: Parse pytest pass/fail counts
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+
+          xml_file = "reports/pytest-results.xml"
+          metrics = {
+              "total": 0,
+              "passed": 0,
+              "failed": 0,
+              "errors": 0,
+              "skipped": 0,
+              "exit_code": int(open("reports/pytest-exit-code.txt").read().strip()) if os.path.exists("reports/pytest-exit-code.txt") else 1
           }
 
-          compile_c() {
-            local file="$1"
-            if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file"
-              return 0
-            fi
+          if os.path.exists(xml_file):
+              root = ET.parse(xml_file).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              for suite in suites:
+                  tests = int(suite.attrib.get("tests", 0))
+                  failures = int(suite.attrib.get("failures", 0))
+                  errors = int(suite.attrib.get("errors", 0))
+                  skipped = int(suite.attrib.get("skipped", 0))
+                  metrics["total"] += tests
+                  metrics["failed"] += failures
+                  metrics["errors"] += errors
+                  metrics["skipped"] += skipped
+              metrics["passed"] = max(metrics["total"] - metrics["failed"] - metrics["errors"] - metrics["skipped"], 0)
 
-            local base="${file%.*}"
-            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..."
-              gcc -Wall -o "$base" "$file"
-              echo "Running $base..."
-              "./$base"
-            else
-              echo "No main() found in $file — compiling as object only..."
-              gcc -Wall -c "$file" -o "${base}.o"
-            fi
+          with open("reports/pytest-metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
+
+          print(json.dumps(metrics, indent=2))
+          PY
+
+      # ---------------------------------------------------------
+      # 2) Discover, compile, and run C/C++ from agent/
+      # ---------------------------------------------------------
+      - name: Discover C/C++ files in agent/
+        shell: bash
+        run: |
+          find agent -maxdepth 1 -type f \( -name "*.c" -o -name "*.cpp" \) | sort > reports/native-files.txt || true
+          echo "Discovered native files:"
+          cat reports/native-files.txt || true
+
+      - name: Compile and run C/C++ files safely
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          native_list = Path("reports/native-files.txt")
+          rows = []
+
+          if native_list.exists():
+              for line in native_list.read_text().splitlines():
+                  file_path = Path(line.strip())
+                  if not file_path.exists():
+                      continue
+
+                  ext = file_path.suffix.lower()
+                  compiler = "g++" if ext == ".cpp" else "gcc"
+                  language = "cpp" if ext == ".cpp" else "c"
+                  has_main = bool(re.search(r'^\s*int\s+main\s*\(', file_path.read_text(errors="ignore"), re.MULTILINE))
+
+                  result = {
+                      "file": str(file_path),
+                      "language": language,
+                      "has_main": has_main,
+                      "compile_ok": False,
+                      "run_ok": None,
+                      "notes": ""
+                  }
+
+                  out_base = file_path.with_suffix("")
+                  try:
+                      if has_main:
+                          cmd = [compiler, "-Wall", "-std=c++17"] if language == "cpp" else [compiler, "-Wall"]
+                          cmd += ["-o", str(out_base), str(file_path)]
+                          p = subprocess.run(cmd, text=True, capture_output=True)
+                          if p.returncode == 0:
+                              result["compile_ok"] = True
+                              r = subprocess.run([str(out_base)], text=True, capture_output=True)
+                              result["run_ok"] = (r.returncode == 0)
+                              result["notes"] = (p.stdout + p.stderr + "\n" + r.stdout + r.stderr).strip()
+                          else:
+                              result["notes"] = (p.stdout + p.stderr).strip()
+                      else:
+                          obj_file = str(out_base) + ".o"
+                          cmd = [compiler, "-Wall", "-c", str(file_path), "-o", obj_file]
+                          if language == "cpp":
+                              cmd.insert(2, "-std=c++17")
+                          p = subprocess.run(cmd, text=True, capture_output=True)
+                          result["compile_ok"] = (p.returncode == 0)
+                          result["run_ok"] = None
+                          result["notes"] = (p.stdout + p.stderr).strip() or "Compiled as object only (no main())"
+                  except Exception as e:
+                      result["notes"] = str(e)
+
+                  rows.append(result)
+
+          with open("reports/native-results.csv", "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=["file", "language", "has_main", "compile_ok", "run_ok", "notes"])
+              writer.writeheader()
+              writer.writerows(rows)
+
+          metrics = {
+              "total_files": len(rows),
+              "compile_pass": sum(1 for r in rows if r["compile_ok"]),
+              "compile_fail": sum(1 for r in rows if not r["compile_ok"]),
+              "run_pass": sum(1 for r in rows if r["run_ok"] is True),
+              "run_fail": sum(1 for r in rows if r["run_ok"] is False),
+              "object_only": sum(1 for r in rows if r["has_main"] is False),
           }
 
-          compile_cpp "sample_mutation.cpp"
-          compile_c "sample_mutation.c"
-          compile_c "sample.c"
+          import json
+          with open("reports/native-metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
 
-      - name: List generated binaries/objects
-        working-directory: agent
+          print(json.dumps(metrics, indent=2))
+          PY
+
+      # ---------------------------------------------------------
+      # 3) Run mutmut on selected Python target
+      # ---------------------------------------------------------
+      - name: Build mutmut config
+        shell: bash
         run: |
-          ls -lah
-          find . -maxdepth 1 \( -name "*.o" -o -perm -111 \) | sort | tee ../reports/cpp-build-output.txt
+          python - <<'PY'
+          from pathlib import Path
+          import os
 
-      - name: Upload C/C++ build report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: cpp-build-report
-          path: reports/cpp-build-output.txt
-          if-no-files-found: warn
+          mutate_target = os.environ.get("MUTATE_TARGET", "hello.py").strip()
+          if mutate_target.startswith("agent/"):
+              mutate_target = mutate_target[len("agent/"):]
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 4 — FastAPI Service Smoke Test
-  # ─────────────────────────────────────────────────────────────
-  api-service:
-    name: "4 · FastAPI Service Health & Smoke"
-    runs-on: ubuntu-latest
-    needs: unit-tests
+          agent = Path("agent")
+          target_file = agent / mutate_target
+          if not target_file.exists():
+              raise SystemExit(f"Mutation target not found: {target_file}")
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+          test_files = []
+          p = Path("reports/pytest-files.txt")
+          if p.exists():
+              for line in p.read_text().splitlines():
+                  line = line.strip()
+                  if line.startswith("agent/"):
+                      line = line[len("agent/"):]
+                  if line:
+                      test_files.append(line)
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          cfg = ["[mutmut]"]
+          cfg.append("source_paths=")
+          cfg.append(f"    {mutate_target}")
+          cfg.append("pytest_add_cli_args_test_selection=")
+          if test_files:
+              for t in test_files:
+                  cfg.append(f"    {t}")
+          else:
+              cfg.append("    test_*.py")
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+          (agent / "setup.cfg").write_text("\n".join(cfg) + "\n")
+          print((agent / "setup.cfg").read_text())
+          PY
 
-      - name: Start FastAPI service in background
-        working-directory: agent/services
+      - name: Run mutmut and create HTML
+        shell: bash
         run: |
-          nohup python core_mutation_service.py > ../../fastapi.log 2>&1 &
-          echo "SERVICE_PID=$!" >> $GITHUB_ENV
+          set +e
+          cd agent
+          mutmut run
+          MUTMUT_EXIT=$?
+          mutmut results --all > ../reports/mutmut-results.txt 2>&1 || true
+          mutmut html || true
+          if [ -d html ]; then
+            cp -r html ../site/mutmut-html
+          fi
+          cd ..
+          set -e
 
-      - name: Wait for service to be healthy (max 30 s)
+          echo "$MUTMUT_EXIT" > reports/mutmut-exit-code.txt
+
+      - name: Parse real mutmut score
         run: |
-          for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.SERVICE_URL }}/health || true)
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Service is healthy after ${i}s"
-              exit 0
-            fi
-            echo "Attempt $i/30 — waiting..."
-            sleep 1
-          done
-          echo "❌ Service did not start in time"
-          echo "------ FastAPI log ------"
-          cat fastapi.log || true
-          exit 1
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from collections import Counter
 
-      - name: Smoke test — POST /mutate
+          results_file = "reports/mutmut-results.txt"
+          statuses = Counter({
+              "killed": 0,
+              "survived": 0,
+              "timeout": 0,
+              "suspicious": 0,
+              "skipped": 0,
+              "no tests": 0,
+              "not checked": 0,
+              "segfault": 0
+          })
+
+          if os.path.exists(results_file):
+              for raw in open(results_file, encoding="utf-8", errors="ignore"):
+                  line = raw.strip().lower()
+                  if not line:
+                      continue
+                  for status in list(statuses.keys()):
+                      if line.endswith(status) or f": {status}" in line:
+                          statuses[status] += 1
+                          break
+
+          considered = statuses["killed"] + statuses["survived"] + statuses["timeout"] + statuses["suspicious"] + statuses["no tests"] + statuses["segfault"]
+          score = round((statuses["killed"] / considered) * 100, 2) if considered else 0.0
+
+          metrics = {
+              "exit_code": int(open("reports/mutmut-exit-code.txt").read().strip()) if os.path.exists("reports/mutmut-exit-code.txt") else 1,
+              "killed": statuses["killed"],
+              "survived": statuses["survived"],
+              "timeout": statuses["timeout"],
+              "suspicious": statuses["suspicious"],
+              "skipped": statuses["skipped"],
+              "no_tests": statuses["no tests"],
+              "not_checked": statuses["not checked"],
+              "segfault": statuses["segfault"],
+              "considered": considered,
+              "mutation_score": score
+          }
+
+          with open("reports/mutmut-metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
+
+          print(json.dumps(metrics, indent=2))
+          PY
+
+      # ---------------------------------------------------------
+      # 4) Build one combined metrics file
+      # ---------------------------------------------------------
+      - name: Build unified metrics file
         run: |
-          curl -s -X POST "${{ env.SERVICE_URL }}/mutate" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "source_file": "agent/hello.py",
-              "test_file": "agent/test_hello.py",
-              "language": "python"
-            }' | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print('Response:', json.dumps(data, indent=2))
-          assert 'session_id' in data or 'error' not in data, f'Unexpected error: {data}'
-          print('✅ /mutate endpoint responded correctly')
-          "
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Smoke test — GET /sessions
-        run: |
-          curl -s "${{ env.SERVICE_URL }}/sessions" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print('Sessions:', json.dumps(data, indent=2))
-          print('✅ /sessions endpoint OK')
-          "
+          def load(path):
+              p = Path(path)
+              return json.loads(p.read_text()) if p.exists() else {}
 
-      - name: Upload FastAPI log
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: fastapi-log
-          path: fastapi.log
-          if-no-files-found: warn
+          metrics = {
+              "pytest": load("reports/pytest-metrics.json"),
+              "native": load("reports/native-metrics.json"),
+              "mutmut": load("reports/mutmut-metrics.json"),
+              "branch": "${{ github.ref_name }}",
+              "run_id": "${{ github.run_id }}",
+              "repository": "${{ github.repository }}"
+          }
 
-      - name: Terminate FastAPI service
-        if: always()
-        run: kill $SERVICE_PID || true
+          with open("reports/metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 5 — Grafana Dashboard Update
-  # ─────────────────────────────────────────────────────────────
-  grafana-update:
-    name: "5 · Grafana Dashboard Update"
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    continue-on-error: true
+          print(json.dumps(metrics, indent=2))
+          PY
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Start Grafana container
+      # ---------------------------------------------------------
+      # 5) Start Grafana and create dashboard with real metrics
+      # ---------------------------------------------------------
+      - name: Start Grafana
         run: |
           docker run -d --name grafana \
             -p 3000:3000 \
@@ -294,213 +388,333 @@ jobs:
       - name: Wait for Grafana to be healthy
         run: |
           for i in $(seq 1 60); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.GRAFANA_URL }}/api/health || true)
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.GRAFANA_URL }}/api/health" || true)
             if [ "$STATUS" = "200" ]; then
-              echo "✅ Grafana is healthy after ${i}s"
+              echo "Grafana ready after ${i} checks"
               exit 0
             fi
-            echo "Attempt $i/60 — waiting for Grafana..."
             sleep 2
           done
-          echo "❌ Grafana did not start in time"
           docker logs grafana || true
           exit 1
 
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Create dashboard JSON
+      - name: Create runtime Grafana dashboard JSON
         run: |
-          cat > reports/grafana-dashboard.json <<'EOF'
-          {
-            "dashboard": {
-              "id": null,
-              "uid": "ai-mutation-dashboard",
-              "title": "AI Mutation Testing Dashboard",
-              "tags": ["ci", "mutation", "grafana"],
-              "timezone": "browser",
-              "schemaVersion": 39,
-              "version": 1,
-              "refresh": "10s",
-              "panels": [
-                {
-                  "id": 1,
-                  "type": "text",
-                  "title": "Pipeline Overview",
-                  "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-                  "options": {
-                    "mode": "markdown",
-                    "content": "## AI Mutation Testing CI\nDashboard created from GitHub Actions."
-                  }
-                }
-              ]
-            },
-            "overwrite": true
-          }
-          EOF
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Create or update Grafana dashboard
+          m = json.loads(Path("reports/metrics.json").read_text())
+          p = m.get("pytest", {})
+          n = m.get("native", {})
+          mm = m.get("mutmut", {})
+
+          content = f"""
+          ## AI Mutation Dashboard
+
+          **Repository:** `{m.get('repository','')}`  
+          **Branch:** `{m.get('branch','')}`  
+          **Run ID:** `{m.get('run_id','')}`
+
+          ### Pytest
+          - Total: **{p.get('total', 0)}**
+          - Passed: **{p.get('passed', 0)}**
+          - Failed: **{p.get('failed', 0)}**
+          - Errors: **{p.get('errors', 0)}**
+          - Skipped: **{p.get('skipped', 0)}**
+
+          ### C / C++
+          - Files discovered: **{n.get('total_files', 0)}**
+          - Compile pass: **{n.get('compile_pass', 0)}**
+          - Compile fail: **{n.get('compile_fail', 0)}**
+          - Run pass: **{n.get('run_pass', 0)}**
+          - Run fail: **{n.get('run_fail', 0)}**
+          - Object-only (no main): **{n.get('object_only', 0)}**
+
+          ### Mutmut
+          - Killed: **{mm.get('killed', 0)}**
+          - Survived: **{mm.get('survived', 0)}**
+          - No tests: **{mm.get('no_tests', 0)}**
+          - Timeout: **{mm.get('timeout', 0)}**
+          - Suspicious: **{mm.get('suspicious', 0)}**
+          - Mutation score: **{mm.get('mutation_score', 0)}%**
+          """
+
+          dashboard = {
+              "dashboard": {
+                  "id": None,
+                  "uid": "ai-mutation-dashboard",
+                  "title": "AI Mutation Dashboard",
+                  "tags": ["ci", "pytest", "mutmut", "grafana"],
+                  "timezone": "browser",
+                  "schemaVersion": 39,
+                  "version": 1,
+                  "refresh": "10s",
+                  "panels": [
+                      {
+                          "id": 1,
+                          "type": "text",
+                          "title": "Run Metrics",
+                          "gridPos": {"h": 18, "w": 24, "x": 0, "y": 0},
+                          "options": {
+                              "mode": "markdown",
+                              "content": content
+                          }
+                      }
+                  ]
+              },
+              "overwrite": True
+          }
+
+          Path("reports/grafana-dashboard.json").write_text(json.dumps(dashboard, indent=2))
+          print(json.dumps(dashboard, indent=2))
+          PY
+
+      - name: Push dashboard to Grafana
         run: |
           curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -X POST "${{ env.GRAFANA_URL }}/api/dashboards/db" \
             --data @reports/grafana-dashboard.json > reports/grafana-response.json
+
           cat reports/grafana-response.json
 
-      - name: Export Grafana health response
+      - name: Capture Grafana screenshot
         run: |
-          curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
-            "${{ env.GRAFANA_URL }}/api/health" > reports/grafana-health.json
+          cat > capture-grafana.js <<'EOF'
+          const { chromium } = require('playwright');
 
-      - name: Upload Grafana artifacts
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage({ viewport: { width: 1600, height: 1400 } });
+
+            await page.goto('http://127.0.0.1:3000/login', { waitUntil: 'networkidle' });
+            await page.fill('input[name="user"]', 'admin');
+            await page.fill('input[name="password"]', 'admin');
+            await page.click('button[type="submit"]');
+            await page.waitForTimeout(3000);
+
+            await page.goto('http://127.0.0.1:3000/d/ai-mutation-dashboard', { waitUntil: 'networkidle' });
+            await page.waitForTimeout(5000);
+
+            await page.screenshot({ path: 'site/grafana-dashboard.png', fullPage: true });
+            await browser.close();
+          })();
+          EOF
+
+          node capture-grafana.js
+
+      # ---------------------------------------------------------
+      # 6) Create one polished HTML dashboard page
+      # ---------------------------------------------------------
+      - name: Build single polished HTML dashboard
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          metrics = json.loads(Path("reports/metrics.json").read_text())
+          p = metrics["pytest"]
+          n = metrics["native"]
+          mm = metrics["mutmut"]
+
+          html = f"""<!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>AI Mutation Dashboard</title>
+            <style>
+              :root {{
+                --bg: #0f172a;
+                --card: #111827;
+                --card2: #1f2937;
+                --text: #e5e7eb;
+                --muted: #94a3b8;
+                --accent: #38bdf8;
+                --green: #22c55e;
+                --red: #ef4444;
+                --amber: #f59e0b;
+                --border: #334155;
+              }}
+              * {{ box-sizing: border-box; }}
+              body {{
+                margin: 0;
+                font-family: Inter, Arial, sans-serif;
+                background: linear-gradient(180deg, #020617, #0f172a);
+                color: var(--text);
+              }}
+              header {{
+                padding: 32px 24px 12px;
+              }}
+              header h1 {{
+                margin: 0 0 8px 0;
+                font-size: 32px;
+              }}
+              header p {{
+                margin: 0;
+                color: var(--muted);
+              }}
+              main {{
+                padding: 24px;
+                display: grid;
+                gap: 18px;
+              }}
+              .grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 16px;
+              }}
+              .card {{
+                background: rgba(17, 24, 39, 0.95);
+                border: 1px solid var(--border);
+                border-radius: 18px;
+                padding: 18px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+              }}
+              .card h2, .card h3 {{
+                margin-top: 0;
+              }}
+              .metric {{
+                display: flex;
+                justify-content: space-between;
+                padding: 8px 0;
+                border-bottom: 1px solid rgba(148,163,184,0.12);
+              }}
+              .metric:last-child {{
+                border-bottom: none;
+              }}
+              .value {{
+                font-weight: 700;
+              }}
+              .good {{ color: var(--green); }}
+              .bad {{ color: var(--red); }}
+              .warn {{ color: var(--amber); }}
+              .score-wrap {{
+                margin-top: 12px;
+                background: #0b1220;
+                border-radius: 999px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+              }}
+              .score-bar {{
+                height: 18px;
+                width: {mm.get('mutation_score', 0)}%;
+                background: linear-gradient(90deg, #06b6d4, #22c55e);
+              }}
+              .links a {{
+                color: var(--accent);
+                text-decoration: none;
+                display: inline-block;
+                margin: 6px 10px 0 0;
+              }}
+              .links a:hover {{
+                text-decoration: underline;
+              }}
+              img {{
+                width: 100%;
+                border-radius: 16px;
+                border: 1px solid var(--border);
+                background: white;
+              }}
+              .hero {{
+                display: grid;
+                grid-template-columns: 1.2fr 1fr;
+                gap: 16px;
+              }}
+              @media (max-width: 900px) {{
+                .hero {{
+                  grid-template-columns: 1fr;
+                }}
+              }}
+            </style>
+          </head>
+          <body>
+            <header>
+              <h1>AI Mutation Dashboard</h1>
+              <p>Repository: {metrics.get('repository', '')} · Branch: {metrics.get('branch', '')} · Run ID: {metrics.get('run_id', '')}</p>
+            </header>
+
+            <main>
+              <section class="hero">
+                <div class="card">
+                  <h2>Mutation Score</h2>
+                  <div class="metric"><span>Killed</span><span class="value good">{mm.get('killed', 0)}</span></div>
+                  <div class="metric"><span>Survived</span><span class="value bad">{mm.get('survived', 0)}</span></div>
+                  <div class="metric"><span>No Tests</span><span class="value warn">{mm.get('no_tests', 0)}</span></div>
+                  <div class="metric"><span>Timeout</span><span class="value warn">{mm.get('timeout', 0)}</span></div>
+                  <div class="metric"><span>Suspicious</span><span class="value warn">{mm.get('suspicious', 0)}</span></div>
+                  <div class="metric"><span>Considered Mutants</span><span class="value">{mm.get('considered', 0)}</span></div>
+                  <div class="metric"><span>Real Mutation Score</span><span class="value">{mm.get('mutation_score', 0)}%</span></div>
+                  <div class="score-wrap"><div class="score-bar"></div></div>
+                </div>
+
+                <div class="card">
+                  <h2>Pytest + Native Status</h2>
+                  <div class="metric"><span>Pytest Total</span><span class="value">{p.get('total', 0)}</span></div>
+                  <div class="metric"><span>Pytest Passed</span><span class="value good">{p.get('passed', 0)}</span></div>
+                  <div class="metric"><span>Pytest Failed</span><span class="value bad">{p.get('failed', 0)}</span></div>
+                  <div class="metric"><span>Pytest Errors</span><span class="value bad">{p.get('errors', 0)}</span></div>
+                  <div class="metric"><span>Pytest Skipped</span><span class="value warn">{p.get('skipped', 0)}</span></div>
+                  <div class="metric"><span>C/C++ Compile Pass</span><span class="value good">{n.get('compile_pass', 0)}</span></div>
+                  <div class="metric"><span>C/C++ Compile Fail</span><span class="value bad">{n.get('compile_fail', 0)}</span></div>
+                  <div class="metric"><span>C/C++ Run Pass</span><span class="value good">{n.get('run_pass', 0)}</span></div>
+                  <div class="metric"><span>C/C++ Run Fail</span><span class="value bad">{n.get('run_fail', 0)}</span></div>
+                </div>
+              </section>
+
+              <section class="grid">
+                <div class="card">
+                  <h3>Reports</h3>
+                  <div class="links">
+                    <a href="pytest-report.html">Pytest HTML</a>
+                    <a href="mutmut-html/index.html">Mutmut HTML</a>
+                    <a href="grafana-dashboard.png">Grafana Screenshot</a>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <h3>Discovery Summary</h3>
+                  <div class="metric"><span>Native files found</span><span class="value">{n.get('total_files', 0)}</span></div>
+                  <div class="metric"><span>Object-only files</span><span class="value">{n.get('object_only', 0)}</span></div>
+                  <div class="metric"><span>Pytest exit code</span><span class="value">{p.get('exit_code', 0)}</span></div>
+                  <div class="metric"><span>Mutmut exit code</span><span class="value">{mm.get('exit_code', 0)}</span></div>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Grafana Dashboard Preview</h2>
+                <img src="grafana-dashboard.png" alt="Grafana dashboard preview">
+              </section>
+            </main>
+          </body>
+          </html>
+          """
+
+          Path("site/index.html").write_text(html, encoding="utf-8")
+          PY
+
+      - name: Copy important HTML files into site
+        run: |
+          cp reports/pytest-report.html site/ || true
+
+      - name: Upload single polished dashboard site
+        uses: actions/upload-artifact@v6
+        with:
+          name: polished-dashboard-site
+          path: site/
+          if-no-files-found: warn
+
+      - name: Upload raw metrics bundle
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: grafana-artifacts
+          name: metrics-bundle
           path: reports/
           if-no-files-found: warn
 
-      - name: Stop Grafana container
+      - name: Stop Grafana
         if: always()
         run: |
           docker stop grafana || true
           docker rm grafana || true
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 6 — Mutation Testing
-  # ─────────────────────────────────────────────────────────────
-  mutation-run:
-    name: "6 · Mutation Testing (mutmut + AI Agents)"
-    runs-on: ubuntu-latest
-    needs: [unit-tests, cpp-tests]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Run mutmut on hello.py
-        working-directory: agent
-        run: |
-          mutmut run \
-            --paths-to-mutate hello.py \
-            --tests-dir . \
-            --runner "python -m pytest" \
-          || true
-
-      - name: Export mutmut HTML report
-        working-directory: agent
-        run: |
-          mutmut html || true
-          mkdir -p ../reports
-          cp -r html ../reports/mutmut-report || true
-
-      - name: Display mutmut summary
-        working-directory: agent
-        run: mutmut results || true
-
-      - name: Run AI Agent pipeline
-        working-directory: agent
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          if [ -n "$OPENAI_API_KEY" ]; then
-            echo "🤖 OPENAI_API_KEY present — running AI agents..."
-            python run_agents.py
-          else
-            echo "⚠️ OPENAI_API_KEY not set — skipping AI agent stage."
-          fi
-
-      - name: Upload mutation reports
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: mutation-reports
-          path: reports/
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 7 — Full End-to-End Orchestration
-  # ─────────────────────────────────────────────────────────────
-  e2e-verify:
-    name: "7 · Full E2E Orchestration (run_all.py)"
-    runs-on: ubuntu-latest
-    needs: [api-service, mutation-run, grafana-update]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run full E2E orchestration
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python run_all.py
-
-      - name: Upload E2E HTML report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: e2e-baseline-report
-          path: baseline-report.html
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 8 — Summary
-  # ─────────────────────────────────────────────────────────────
-  report:
-    name: "8 · Summary & Report"
-    runs-on: ubuntu-latest
-    needs:
-      - lint
-      - unit-tests
-      - cpp-tests
-      - api-service
-      - grafana-update
-      - mutation-run
-      - e2e-verify
-    if: always()
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: all-reports
-
-      - name: Write job summary
-        run: |
-          echo "## 🧬 AI Mutation Testing — Pipeline Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| 1 · Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '⚠️ Needs Cleanup' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 2 · Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 3 · C/C++ Tests | ${{ needs.cpp-tests.result == 'success' && '✅ Passed' || '⚠️ Review Build Output' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 4 · API Service | ${{ needs.api-service.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 5 · Grafana Update | ${{ needs.grafana-update.result == 'success' && '✅ Passed' || '⚠️ Optional Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 6 · Mutation Run | ${{ needs.mutation-run.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 7 · E2E Verify | ${{ needs.e2e-verify.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> Artifacts attached: flake8 report, pytest XML, FastAPI log, C/C++ build report, mutmut HTML, Grafana JSON, baseline-report.html" >> $GITHUB_STEP_SUMMARY
-
-      - name: List downloaded artifacts
-        run: find all-reports -type f | sort
