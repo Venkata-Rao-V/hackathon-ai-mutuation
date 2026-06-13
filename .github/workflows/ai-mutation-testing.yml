@@ -1,7 +1,6 @@
 name: AI Mutation Testing CI
 
-run-name: >-
-  AI Mutation Testing (${{ github.event_name == 'workflow_dispatch' && format('manual | branch={0}', inputs.target_branch) || github.ref_name }})
+run-name: "AI Mutation Testing - ${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', inputs.target_branch) || github.ref_name }}"
 
 on:
   push:
@@ -24,54 +23,15 @@ on:
           - main
           - develop
 
-      run_lint:
-        description: "Run lint stage"
-        required: true
-        type: boolean
-        default: true
-
-      run_unit_tests:
-        description: "Run Python unit tests"
-        required: true
-        type: boolean
-        default: true
-
-      run_cpp_tests:
-        description: "Run C/C++ compile & test"
-        required: true
-        type: boolean
-        default: true
-
-      run_api_service:
-        description: "Run FastAPI smoke test"
-        required: true
-        type: boolean
-        default: true
-
-      run_grafana:
-        description: "Run Grafana dashboard stage"
-        required: true
-        type: boolean
-        default: true
-
-      run_mutation:
-        description: "Run mutation testing"
-        required: true
-        type: boolean
-        default: true
-
-      run_e2e:
-        description: "Run full E2E orchestration"
-        required: true
-        type: boolean
-        default: true
-
 env:
   PYTHON_VERSION: "3.11"
   SERVICE_URL: "http://127.0.0.1:8000"
   GRAFANA_URL: "http://127.0.0.1:3000"
   GRAFANA_USER: "admin"
   GRAFANA_PASSWORD: "admin"
+
+permissions:
+  contents: read
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -81,7 +41,6 @@ jobs:
     name: "1 · Lint & Static Analysis"
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lint }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -97,7 +56,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Debug trigger inputs
+      - name: Debug trigger
         run: |
           echo "event_name=${{ github.event_name }}"
           echo "ref_name=${{ github.ref_name }}"
@@ -114,7 +73,7 @@ jobs:
         run: |
           pip install flake8 flake8-bugbear flake8-html
 
-      - name: Generate flake8 HTML report
+      - name: Generate flake8 HTML report (non-blocking)
         run: |
           mkdir -p reports/flake8-html
           flake8 agent/services/ agent/*.py run_all.py \
@@ -139,7 +98,6 @@ jobs:
     name: "2 · Python Unit Tests"
     runs-on: ubuntu-latest
     needs: lint
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_unit_tests) }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -172,14 +130,7 @@ jobs:
       - name: Run pytest and generate HTML report
         working-directory: agent
         run: |
-          # Dynamically discover all test_*.py files — no hardcoding
-          TEST_FILES=$(find . -maxdepth 2 -name 'test_*.py' | sort | tr '\n' ' ')
-          echo "Discovered Python test files: $TEST_FILES"
-          if [ -z "$TEST_FILES" ]; then
-            echo "No Python test files found — skipping."
-            exit 0
-          fi
-          pytest $TEST_FILES \
+          pytest \
             -v \
             --tb=short \
             --junitxml=../reports/pytest-results.xml \
@@ -198,14 +149,13 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3 — C / C++ Compile & Test
+  # JOB 3 — C / C++ Compile & Test (separate steps)
   # ─────────────────────────────────────────────────────────────
   cpp-tests:
     name: "3 · C / C++ Compile & Test"
     runs-on: ubuntu-latest
     needs: lint
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests) }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -229,93 +179,85 @@ jobs:
       - name: Create reports directory
         run: mkdir -p reports
 
-      - name: Compile C/C++ safely
+      # ==========================================================
+      # C++ STEP
+      # ==========================================================
+      - name: Compile and test C++ files
         working-directory: agent
         shell: bash
         run: |
           set +e
+          shopt -s nullglob
+
           LOG="../reports/cpp-build.log"
           : > "$LOG"
 
-          # ── Dynamically discover and compile all test_* files paired with sources ──
-          # For each test_<stem>.<ext>, look for <stem>.<ext> (or .c/.cpp cross-pair)
-          find . -maxdepth 2 \( -name 'test_*.cpp' -o -name 'test_*.cc' \) | sort | while read -r TEST_FILE; do
-            STEM=$(basename "$TEST_FILE" | sed 's/^test_//;s/\.[^.]*$//')
-            EXT=$(basename "$TEST_FILE" | sed 's/.*\.//')
-            DIR=$(dirname "$TEST_FILE")
-            # Prefer same extension, fall back to .cpp/.cc
-            if   [ -f "$DIR/${STEM}.${EXT}" ]; then SRC="$DIR/${STEM}.${EXT}"
-            elif [ -f "$DIR/${STEM}.cpp" ];     then SRC="$DIR/${STEM}.cpp"
-            elif [ -f "$DIR/${STEM}.cc" ];      then SRC="$DIR/${STEM}.cc"
+          cpp_files=( *.cpp )
+
+          if [ ${#cpp_files[@]} -eq 0 ]; then
+            echo "No C++ files found in agent/" | tee -a "$LOG"
+            exit 0
+          fi
+
+          compile_cpp() {
+            local file="$1"
+            local base="${file%.*}"
+
+            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
+              echo "Compiling C++ executable: $file" | tee -a "$LOG"
+              g++ -std=c++17 -Wall -o "$base" "$file" >> "$LOG" 2>&1
+
+              if [ $? -eq 0 ]; then
+                echo "Running C++ executable: ./$base" | tee -a "$LOG"
+                "./$base" >> "$LOG" 2>&1
+              else
+                echo "C++ compile failed: $file" | tee -a "$LOG"
+              fi
             else
-              echo "No C++ source found for $TEST_FILE — compiling test-only"
-              SRC=""
+              echo "No main() in $file — compiling as C++ object only" | tee -a "$LOG"
+              g++ -std=c++17 -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
             fi
-            OUT=$(basename "$TEST_FILE" .${EXT})
-            echo "Compiling: $TEST_FILE ${SRC:+with $SRC}" | tee -a "$LOG"
-            if [ -n "$SRC" ]; then
-              g++ -std=c++17 -Wall -I. -o "$DIR/$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
-            else
-              g++ -std=c++17 -Wall -I. -o "$DIR/$OUT" "$TEST_FILE" >> "$LOG" 2>&1
-            fi
-            if [ $? -eq 0 ]; then
-              echo "Running $DIR/$OUT ..." | tee -a "$LOG"
-              "$DIR/$OUT" >> "$LOG" 2>&1 && echo "[PASS] $OUT" | tee -a "$LOG" || echo "[FAIL] $OUT" | tee -a "$LOG"
-            else
-              echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
-            fi
+          }
+
+          for file in "${cpp_files[@]}"; do
+            compile_cpp "$file"
           done
 
-          find . -maxdepth 2 -name 'test_*.c' | sort | while read -r TEST_FILE; do
-            STEM=$(basename "$TEST_FILE" .c)
-            STEM="${STEM#test_}"
-            DIR=$(dirname "$TEST_FILE")
-            SRC=""
-            if   [ -f "$DIR/${STEM}.c" ]; then SRC="$DIR/${STEM}.c"
-            fi
-            OUT=$(basename "$TEST_FILE" .c)
-            echo "Compiling C: $TEST_FILE ${SRC:+with $SRC}" | tee -a "$LOG"
-            if [ -n "$SRC" ]; then
-              gcc -std=c11 -Wall -o "$DIR/$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
-            else
-              gcc -std=c11 -Wall -o "$DIR/$OUT" "$TEST_FILE" >> "$LOG" 2>&1
-            fi
-            if [ $? -eq 0 ]; then
-              echo "Running $DIR/$OUT ..." | tee -a "$LOG"
-              "$DIR/$OUT" >> "$LOG" 2>&1 && echo "[PASS] $OUT" | tee -a "$LOG" || echo "[FAIL] $OUT" | tee -a "$LOG"
-            else
-              echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
-            fi
-          done
-
-      - name: Generate C/C++ HTML report
+      - name: Generate C++ HTML report
         run: |
           python - <<'PY'
           import html
           from pathlib import Path
 
           log_path = Path("reports/cpp-build.log")
-          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No build log found."
+          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C++ build log found."
 
           report = f"""<!DOCTYPE html>
           <html>
           <head>
             <meta charset="utf-8">
-            <title>C/C++ Build Report</title>
+            <title>C++ Build Report</title>
             <style>
               body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+              }}
             </style>
           </head>
           <body>
-            <h1>C/C++ Build & Test Report</h1>
+            <h1>C++ Build & Test Report</h1>
             <pre>{html.escape(content)}</pre>
           </body>
           </html>"""
+
           Path("reports/cpp-report.html").write_text(report, encoding="utf-8")
           PY
 
-      - name: Upload C/C++ report
+      - name: Upload C++ report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -325,6 +267,94 @@ jobs:
             reports/cpp-report.html
           if-no-files-found: warn
 
+      # ==========================================================
+      # C STEP
+      # ==========================================================
+      - name: Compile and test C files
+        working-directory: agent
+        shell: bash
+        run: |
+          set +e
+          shopt -s nullglob
+
+          LOG="../reports/c-build.log"
+          : > "$LOG"
+
+          c_files=( *.c )
+
+          if [ ${#c_files[@]} -eq 0 ]; then
+            echo "No C files found in agent/" | tee -a "$LOG"
+            exit 0
+          fi
+
+          compile_c() {
+            local file="$1"
+            local base="${file%.*}"
+
+            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
+              echo "Compiling C executable: $file" | tee -a "$LOG"
+              gcc -Wall -o "$base" "$file" >> "$LOG" 2>&1
+
+              if [ $? -eq 0 ]; then
+                echo "Running C executable: ./$base" | tee -a "$LOG"
+                "./$base" >> "$LOG" 2>&1
+              else
+                echo "C compile failed: $file" | tee -a "$LOG"
+              fi
+            else
+              echo "No main() in $file — compiling as C object only" | tee -a "$LOG"
+              gcc -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
+            fi
+          }
+
+          for file in "${c_files[@]}"; do
+            compile_c "$file"
+          done
+
+      - name: Generate C HTML report
+        run: |
+          python - <<'PY'
+          import html
+          from pathlib import Path
+
+          log_path = Path("reports/c-build.log")
+          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C build log found."
+
+          report = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>C Build Report</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 24px; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+              }}
+            </style>
+          </head>
+          <body>
+            <h1>C Build & Test Report</h1>
+            <pre>{html.escape(content)}</pre>
+          </body>
+          </html>"""
+
+          Path("reports/c-report.html").write_text(report, encoding="utf-8")
+          PY
+
+      - name: Upload C report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-report
+          path: |
+            reports/c-build.log
+            reports/c-report.html
+          if-no-files-found: warn
+
   # ─────────────────────────────────────────────────────────────
   # JOB 4 — FastAPI Service Smoke Test
   # ─────────────────────────────────────────────────────────────
@@ -332,7 +362,6 @@ jobs:
     name: "4 · FastAPI Service Health & Smoke"
     runs-on: ubuntu-latest
     needs: unit-tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_api_service) }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -380,15 +409,28 @@ jobs:
           cat reports/fastapi.log || true
           exit 1
 
+      - name: Auto-discover source/test files for smoke test
+        shell: bash
+        run: |
+          set -e
+          SOURCE_FILE=$(find agent -maxdepth 1 -type f -name "*.py" ! -name "test_*" ! -name "run_agents.py" | sort | head -n 1)
+          TEST_FILE=$(find agent -maxdepth 1 -type f -name "test_*.py" | sort | head -n 1)
+
+          echo "SOURCE_FILE=$SOURCE_FILE" >> $GITHUB_ENV
+          echo "TEST_FILE=$TEST_FILE" >> $GITHUB_ENV
+
+          echo "Selected source: $SOURCE_FILE"
+          echo "Selected test:   $TEST_FILE"
+
       - name: Smoke test POST /mutate
         run: |
           curl -s -X POST "${{ env.SERVICE_URL }}/mutate" \
             -H "Content-Type: application/json" \
-            -d '{
-              "source_file": "agent/hello.py",
-              "test_file": "agent/test_hello.py",
-              "language": "python"
-            }' > reports/mutate-response.json
+            -d "{
+              \"source_file\": \"${SOURCE_FILE}\",
+              \"test_file\": \"${TEST_FILE}\",
+              \"language\": \"python\"
+            }" > reports/mutate-response.json
 
       - name: Smoke test GET /sessions
         run: |
@@ -425,7 +467,13 @@ jobs:
             <title>FastAPI Smoke Report</title>
             <style>
               body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+              }}
             </style>
           </head>
           <body>
@@ -438,6 +486,7 @@ jobs:
             <pre>{html.escape(fastapi_log)}</pre>
           </body>
           </html>"""
+
           Path("reports/api-report.html").write_text(report, encoding="utf-8")
           PY
 
@@ -465,7 +514,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-tests
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_grafana) }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -541,7 +589,7 @@ jobs:
           curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -X POST "${{ env.GRAFANA_URL }}/api/dashboards/db" \
-            --data @reports/grafana-dashboard.json > reports/grafana-create-response.json
+            --data @reports/grafana-dashboard.json > /dev/null
 
       - name: Install Playwright
         run: |
@@ -607,7 +655,6 @@ jobs:
           path: |
             reports/grafana-report.html
             reports/grafana-dashboard.png
-            reports/grafana-create-response.json
           if-no-files-found: warn
 
       - name: Stop Grafana container
@@ -625,7 +672,6 @@ jobs:
     needs:
       - unit-tests
       - cpp-tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_mutation) }}
 
     steps:
       - name: Checkout repository (manual run)
@@ -656,21 +702,8 @@ jobs:
       - name: Run mutmut
         working-directory: agent
         run: |
-          # Dynamically discover all non-test Python source files to mutate
-          SOURCES=$(find . -maxdepth 2 -name '*.py' \
-            ! -name 'test_*' \
-            ! -name 'conftest*.py' \
-            ! -name 'run_*.py' \
-            ! -path '*/services/*' \
-            | sort | sed 's|^./||' | tr '\n' ',')
-          SOURCES="${SOURCES%,}"  # strip trailing comma
-          echo "Mutation targets: $SOURCES"
-          if [ -z "$SOURCES" ]; then
-            echo "No Python source files found for mutation — skipping."
-            exit 0
-          fi
           mutmut run \
-            --paths-to-mutate "$SOURCES" \
+            --paths-to-mutate . \
             --tests-dir . \
             --runner "python -m pytest" || true
 
@@ -712,7 +745,13 @@ jobs:
             <title>Mutation Summary</title>
             <style>
               body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
+              pre {{
+                background: #111827;
+                color: #f9fafb;
+                padding: 16px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+              }}
             </style>
           </head>
           <body>
@@ -745,7 +784,7 @@ jobs:
       - api-service
       - mutation-run
       - grafana-update
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_e2e) }}
+    if: always()
 
     steps:
       - name: Checkout repository (manual run)
@@ -812,6 +851,7 @@ jobs:
           cp -r all-reports/flake8-html final-report/assets/ || true
           cp -r all-reports/pytest-report final-report/assets/ || true
           cp -r all-reports/cpp-report final-report/assets/ || true
+          cp -r all-reports/c-report final-report/assets/ || true
           cp -r all-reports/api-report final-report/assets/ || true
           cp -r all-reports/grafana-visuals final-report/assets/ || true
           cp -r all-reports/mutation-report final-report/assets/ || true
@@ -875,7 +915,8 @@ jobs:
               <ul>
                 <li><a href="assets/flake8-html/index.html">Lint HTML Report</a></li>
                 <li><a href="assets/pytest-report/pytest-report.html">Pytest HTML Report</a></li>
-                <li><a href="assets/cpp-report/cpp-report.html">C/C++ HTML Report</a></li>
+                <li><a href="assets/cpp-report/cpp-report.html">C++ HTML Report</a></li>
+                <li><a href="assets/c-report/c-report.html">C HTML Report</a></li>
                 <li><a href="assets/api-report/api-report.html">FastAPI Smoke HTML Report</a></li>
                 <li><a href="assets/mutation-report/mutation-summary.html">Mutation Summary HTML</a></li>
                 <li><a href="assets/mutation-report/mutmut-report/index.html">Full mutmut HTML Report</a></li>
@@ -900,8 +941,13 @@ jobs:
             </div>
 
             <div class="card">
-              <h2>C/C++ Report Preview</h2>
+              <h2>C++ Report Preview</h2>
               <iframe src="assets/cpp-report/cpp-report.html"></iframe>
+            </div>
+
+            <div class="card">
+              <h2>C Report Preview</h2>
+              <iframe src="assets/c-report/c-report.html"></iframe>
             </div>
 
             <div class="card">
@@ -909,8 +955,7 @@ jobs:
               <iframe src="assets/mutation-report/mutation-summary.html"></iframe>
             </div>
           </body>
-          </html>
-          """
+          </html>"""
 
           Path("final-report/index.html").write_text(html, encoding="utf-8")
           PY
@@ -927,4 +972,5 @@ jobs:
           echo "## AI Mutation Testing - Final Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Final combined HTML report artifact: final-html-report" >> $GITHUB_STEP_SUMMARY
+          echo "- Open final-report/index.html after downloading the artifact." >> $GITHUB_STEP_SUMMARY
           echo "- Grafana is included as a visible screenshot inside the final HTML report." >> $GITHUB_STEP_SUMMARY
