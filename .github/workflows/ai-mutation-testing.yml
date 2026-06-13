@@ -33,6 +33,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug trigger
+        run: |
+          echo "Branch: ${{ github.ref }}"
+          echo "Event: ${{ github.event_name }}"
+
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
@@ -52,7 +57,7 @@ jobs:
 
       - name: Upload lint report
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: flake8-report
           path: reports/flake8-report.txt
@@ -94,7 +99,7 @@ jobs:
 
       - name: Upload pytest results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: pytest-results
           path: reports/pytest-results.xml
@@ -206,7 +211,7 @@ jobs:
 
       - name: Upload FastAPI log
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fastapi-log
           path: fastapi.log
@@ -334,7 +339,7 @@ jobs:
 
       - name: Upload Grafana artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: grafana-artifacts
           path: reports/
@@ -404,7 +409,7 @@ jobs:
 
       - name: Upload mutation reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: mutation-reports
           path: reports/
@@ -437,7 +442,7 @@ jobs:
 
       - name: Upload E2E HTML report
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: e2e-baseline-report
           path: baseline-report.html
@@ -460,7 +465,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: all-reports
 
