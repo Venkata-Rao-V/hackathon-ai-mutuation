@@ -1025,7 +1025,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: "24"
 
@@ -1093,7 +1093,7 @@ jobs:
 
       - name: Resolve dashboard URL
         run: |
-          python - <<'PY'
+          python - <<'PY' >> $GITHUB_ENV
           import json
           import os
           from pathlib import Path
@@ -1113,7 +1113,7 @@ jobs:
                   print(f"DASHBOARD_URL={default_url}")
           else:
               print(f"DASHBOARD_URL={default_url}")
-          PY >> $GITHUB_ENV
+          PY
 
       - name: Install Playwright
         run: |
@@ -1266,7 +1266,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: all-reports
 
