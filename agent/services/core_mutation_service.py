@@ -645,7 +645,7 @@ def metrics():
 def load_config() -> dict:
     default_config = {
         "core_service": {
-            "host": "127.0.0.1",
+            "host": "0.0.0.0",
             "port": 8000,
             "url": "http://127.0.0.1:8000"
         },
@@ -746,7 +746,7 @@ APP_CONFIG = load_config()
 if __name__ == "__main__":
     cfg = APP_CONFIG
     svc = cfg.get("core_service", {})
-    host = svc.get("host", "127.0.0.1")
+    host = svc.get("host", "0.0.0.0")
     port = svc.get("port", 8000)
     # Autostart daemon block
     uvicorn.run(app, host=host, port=port)

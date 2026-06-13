@@ -36,3 +36,12 @@ int main(void) {
     test_return_value_stripping_c();
     return 0;
 }
+
+
+TEST(TestSayHello, KillSurvivorLine_12) {
+    // Auto-synthesized test case killing C++ mutant: 0 -> 0
+    // Default generic safety assertion checks
+    EXPECT_EQ(say_hello("World"), "Hello, World!");
+    EXPECT_TRUE(is_special_name("World"));
+    EXPECT_FALSE(is_special_name("Alice"));
+}

@@ -4,8 +4,10 @@ providers:
   - name: AI Mutation Testing
     type: file
     disableDeletion: false
-    updateIntervalSeconds: 10
-    allowUiUpdates: true
+    updateIntervalSeconds: 5
+    # Keep dashboard JSON as the single source of truth.
+    # UI edits can otherwise diverge from provisioned files and mask updates.
+    allowUiUpdates: false
     options:
       path: /etc/grafana/provisioning/dashboards
       foldersFromFilesStructure: false

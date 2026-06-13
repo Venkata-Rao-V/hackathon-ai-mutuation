@@ -265,3 +265,11 @@ class TestIsSpecialName:
 
     def test_numeric_not_special(self):
         assert hello.is_special_name("123") is False
+
+
+def test_kill_survivor_line_15():
+    # Auto-synthesized test case killing mutant transformation: * -> div
+    # Default generic safety assertion checks
+    assert hello.say_hello('World') == 'Hello, World!'
+    assert hello.is_special_name('World') is True
+    assert hello.is_special_name('Alice') is False

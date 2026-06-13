@@ -1,0 +1,341 @@
+# ============================================================
+#  AI Mutation Testing — End-to-End GitHub Actions Workflow
+# ============================================================
+#
+# PIPELINE STAGES
+#   1. lint          → flake8 / syntax checks
+#   2. unit-tests    → pytest on Python test suite
+#   3. cpp-tests     → g++ compile + run C/C++ test suite
+#   4. api-service   → spin up FastAPI, health-check, smoke-test endpoints
+#   5. mutation-run  → run mutmut + AI agent pipeline (run_agents.py)
+#   6. e2e-verify    → run_all.py full orchestration proof
+#   7. report        → upload HTML mutation report as artifact
+# ============================================================
+
+name: AI Mutation Testing CI
+
+on:
+  push:
+    branches: [ "main", "develop", "feature/**" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+  workflow_dispatch:          # allows manual trigger from GitHub UI
+
+# ── global env ────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  SERVICE_URL: "http://127.0.0.1:8000"
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1 — Lint & Static Analysis
+  # ─────────────────────────────────────────────────────────────
+  lint:
+    name: "1 · Lint & Static Analysis"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install lint tools
+        run: pip install flake8 flake8-bugbear
+
+      - name: Run flake8 on agent/services
+        run: |
+          flake8 agent/services/ \
+            --max-line-length=120 \
+            --extend-ignore=E203,W503 \
+            --statistics
+
+      - name: Run flake8 on agent Python files
+        run: |
+          flake8 agent/*.py run_all.py \
+            --max-line-length=120 \
+            --extend-ignore=E203,W503 \
+            --statistics
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2 — Python Unit Tests (pytest)
+  # ─────────────────────────────────────────────────────────────
+  unit-tests:
+    name: "2 · Python Unit Tests"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Run pytest (Python test suite)
+        working-directory: agent
+        run: |
+          pytest \
+            test_hello.py \
+            test_sample_mutation.py \
+            -v \
+            --tb=short \
+            --junitxml=../reports/pytest-results.xml \
+            --no-header
+
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: reports/pytest-results.xml
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3 — C / C++ Compile & Test
+  # ─────────────────────────────────────────────────────────────
+  cpp-tests:
+    name: "3 · C / C++ Compile & Test"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++ gcc make
+
+      - name: Compile sample_mutation.cpp
+        working-directory: agent
+        run: g++ -std=c++17 -Wall -o sample_mutation_cpp sample_mutation.cpp
+
+      - name: Compile sample_mutation.c
+        working-directory: agent
+        run: gcc -Wall -o sample_mutation_c sample_mutation.c
+
+      - name: Compile sample.c
+        working-directory: agent
+        run: gcc -Wall -o sample_c sample.c
+
+      - name: Run C++ smoke binary
+        working-directory: agent
+        run: ./sample_mutation_cpp && echo "C++ binary OK"
+
+      - name: Run C smoke binary
+        working-directory: agent
+        run: ./sample_mutation_c && echo "C binary OK"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4 — FastAPI Service Smoke Test
+  # ─────────────────────────────────────────────────────────────
+  api-service:
+    name: "4 · FastAPI Service Health & Smoke"
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start FastAPI service in background
+        working-directory: agent/services
+        run: |
+          nohup python core_mutation_service.py &
+          echo "SERVICE_PID=$!" >> $GITHUB_ENV
+
+      - name: Wait for service to be healthy (max 30 s)
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.SERVICE_URL }}/health || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Service is healthy after ${i}s"
+              exit 0
+            fi
+            echo "  Attempt $i/30 — waiting…"
+            sleep 1
+          done
+          echo "❌ Service did not start in time"
+          exit 1
+
+      - name: Smoke test — POST /mutate (Python hello.py)
+        run: |
+          curl -s -X POST "${{ env.SERVICE_URL }}/mutate" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "source_file": "agent/hello.py",
+              "test_file":   "agent/test_hello.py",
+              "language":    "python"
+            }' | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print('Response:', json.dumps(data, indent=2))
+          assert 'session_id' in data or 'error' not in data, f'Unexpected error: {data}'
+          print('✅ /mutate endpoint responded correctly')
+          "
+
+      - name: Smoke test — GET /sessions
+        run: |
+          curl -s "${{ env.SERVICE_URL }}/sessions" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print('Sessions:', json.dumps(data, indent=2))
+          print('✅ /sessions endpoint OK')
+          "
+
+      - name: Terminate FastAPI service
+        if: always()
+        run: kill $SERVICE_PID || true
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 5 — Mutation Testing (mutmut + AI agent pipeline)
+  # ─────────────────────────────────────────────────────────────
+  mutation-run:
+    name: "5 · Mutation Testing (mutmut + AI Agents)"
+    runs-on: ubuntu-latest
+    needs: [ unit-tests, cpp-tests ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── mutmut standalone run (no AI key needed) ───────────
+      - name: Run mutmut on hello.py
+        working-directory: agent
+        run: |
+          mutmut run \
+            --paths-to-mutate hello.py \
+            --tests-dir . \
+            --runner "python -m pytest" \
+          || true          # mutmut exits non-zero when survivors exist; continue
+
+      - name: Export mutmut HTML report
+        working-directory: agent
+        run: |
+          mutmut html || true
+          mkdir -p ../reports
+          cp -r html ../reports/mutmut-report || true
+
+      - name: Display mutmut summary
+        working-directory: agent
+        run: mutmut results || true
+
+      # ── AI agent pipeline (requires OPENAI_API_KEY secret) ──
+      - name: Run AI Agent pipeline (run_agents.py)
+        working-directory: agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$OPENAI_API_KEY" ]; then
+            echo "🤖 OPENAI_API_KEY present — running AI agents…"
+            python run_agents.py
+          else
+            echo "⚠️  OPENAI_API_KEY not set — skipping AI agent stage."
+            echo "    Add the secret in: Settings → Secrets → OPENAI_API_KEY"
+          fi
+
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-reports
+          path: reports/
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 6 — Full End-to-End Orchestration (run_all.py)
+  # ─────────────────────────────────────────────────────────────
+  e2e-verify:
+    name: "6 · Full E2E Orchestration (run_all.py)"
+    runs-on: ubuntu-latest
+    needs: [ api-service, mutation-run ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full E2E orchestration
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python run_all.py
+
+      - name: Upload E2E HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-baseline-report
+          path: baseline-report.html
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 7 — Publish Summary (runs after everything)
+  # ─────────────────────────────────────────────────────────────
+  report:
+    name: "7 · Summary & Report"
+    runs-on: ubuntu-latest
+    needs: e2e-verify
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+
+      - name: Write job summary to GitHub Step Summary
+        run: |
+          echo "## 🧬 AI Mutation Testing — Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 · Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2 · Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 3 · C/C++ Tests | ${{ needs.cpp-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4 · API Service | ${{ needs.api-service.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 5 · Mutation Run | ${{ needs.mutation-run.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 6 · E2E Verify | ${{ needs.e2e-verify.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Artifacts (pytest XML, mutmut HTML report, baseline-report.html) attached to this run." >> $GITHUB_STEP_SUMMARY
+
+      - name: List downloaded artifacts
+        run: find all-reports -type f | sort
