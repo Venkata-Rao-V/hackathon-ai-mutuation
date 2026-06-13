@@ -172,9 +172,14 @@ jobs:
       - name: Run pytest and generate HTML report
         working-directory: agent
         run: |
-          pytest \
-            test_hello.py \
-            test_sample_mutation.py \
+          # Dynamically discover all test_*.py files — no hardcoding
+          TEST_FILES=$(find . -maxdepth 2 -name 'test_*.py' | sort | tr '\n' ' ')
+          echo "Discovered Python test files: $TEST_FILES"
+          if [ -z "$TEST_FILES" ]; then
+            echo "No Python test files found — skipping."
+            exit 0
+          fi
+          pytest $TEST_FILES \
             -v \
             --tb=short \
             --junitxml=../reports/pytest-results.xml \
@@ -232,55 +237,56 @@ jobs:
           LOG="../reports/cpp-build.log"
           : > "$LOG"
 
-          compile_cpp() {
-            local file="$1"
-            if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file" | tee -a "$LOG"
-              return 0
-            fi
-
-            local base="${file%.*}"
-            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..." | tee -a "$LOG"
-              g++ -std=c++17 -Wall -o "$base" "$file" >> "$LOG" 2>&1
-              if [ $? -eq 0 ]; then
-                echo "Running ./$base ..." | tee -a "$LOG"
-                "./$base" >> "$LOG" 2>&1
-              else
-                echo "Compile failed for $file" | tee -a "$LOG"
-              fi
+          # ── Dynamically discover and compile all test_* files paired with sources ──
+          # For each test_<stem>.<ext>, look for <stem>.<ext> (or .c/.cpp cross-pair)
+          find . -maxdepth 2 \( -name 'test_*.cpp' -o -name 'test_*.cc' \) | sort | while read -r TEST_FILE; do
+            STEM=$(basename "$TEST_FILE" | sed 's/^test_//;s/\.[^.]*$//')
+            EXT=$(basename "$TEST_FILE" | sed 's/.*\.//')
+            DIR=$(dirname "$TEST_FILE")
+            # Prefer same extension, fall back to .cpp/.cc
+            if   [ -f "$DIR/${STEM}.${EXT}" ]; then SRC="$DIR/${STEM}.${EXT}"
+            elif [ -f "$DIR/${STEM}.cpp" ];     then SRC="$DIR/${STEM}.cpp"
+            elif [ -f "$DIR/${STEM}.cc" ];      then SRC="$DIR/${STEM}.cc"
             else
-              echo "No main() in $file — compiling as object only..." | tee -a "$LOG"
-              g++ -std=c++17 -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
+              echo "No C++ source found for $TEST_FILE — compiling test-only"
+              SRC=""
             fi
-          }
-
-          compile_c() {
-            local file="$1"
-            if [ ! -f "$file" ]; then
-              echo "Skipping missing file: $file" | tee -a "$LOG"
-              return 0
-            fi
-
-            local base="${file%.*}"
-            if grep -Eq '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "$file"; then
-              echo "Compiling $file as executable..." | tee -a "$LOG"
-              gcc -Wall -o "$base" "$file" >> "$LOG" 2>&1
-              if [ $? -eq 0 ]; then
-                echo "Running ./$base ..." | tee -a "$LOG"
-                "./$base" >> "$LOG" 2>&1
-              else
-                echo "Compile failed for $file" | tee -a "$LOG"
-              fi
+            OUT=$(basename "$TEST_FILE" .${EXT})
+            echo "Compiling: $TEST_FILE ${SRC:+with $SRC}" | tee -a "$LOG"
+            if [ -n "$SRC" ]; then
+              g++ -std=c++17 -Wall -I. -o "$DIR/$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
             else
-              echo "No main() in $file — compiling as object only..." | tee -a "$LOG"
-              gcc -Wall -c "$file" -o "${base}.o" >> "$LOG" 2>&1
+              g++ -std=c++17 -Wall -I. -o "$DIR/$OUT" "$TEST_FILE" >> "$LOG" 2>&1
             fi
-          }
+            if [ $? -eq 0 ]; then
+              echo "Running $DIR/$OUT ..." | tee -a "$LOG"
+              "$DIR/$OUT" >> "$LOG" 2>&1 && echo "[PASS] $OUT" | tee -a "$LOG" || echo "[FAIL] $OUT" | tee -a "$LOG"
+            else
+              echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
+            fi
+          done
 
-          compile_cpp "sample_mutation.cpp"
-          compile_c "sample_mutation.c"
-          compile_c "sample.c"
+          find . -maxdepth 2 -name 'test_*.c' | sort | while read -r TEST_FILE; do
+            STEM=$(basename "$TEST_FILE" .c)
+            STEM="${STEM#test_}"
+            DIR=$(dirname "$TEST_FILE")
+            SRC=""
+            if   [ -f "$DIR/${STEM}.c" ]; then SRC="$DIR/${STEM}.c"
+            fi
+            OUT=$(basename "$TEST_FILE" .c)
+            echo "Compiling C: $TEST_FILE ${SRC:+with $SRC}" | tee -a "$LOG"
+            if [ -n "$SRC" ]; then
+              gcc -std=c11 -Wall -o "$DIR/$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
+            else
+              gcc -std=c11 -Wall -o "$DIR/$OUT" "$TEST_FILE" >> "$LOG" 2>&1
+            fi
+            if [ $? -eq 0 ]; then
+              echo "Running $DIR/$OUT ..." | tee -a "$LOG"
+              "$DIR/$OUT" >> "$LOG" 2>&1 && echo "[PASS] $OUT" | tee -a "$LOG" || echo "[FAIL] $OUT" | tee -a "$LOG"
+            else
+              echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
+            fi
+          done
 
       - name: Generate C/C++ HTML report
         run: |
@@ -650,8 +656,21 @@ jobs:
       - name: Run mutmut
         working-directory: agent
         run: |
+          # Dynamically discover all non-test Python source files to mutate
+          SOURCES=$(find . -maxdepth 2 -name '*.py' \
+            ! -name 'test_*' \
+            ! -name 'conftest*.py' \
+            ! -name 'run_*.py' \
+            ! -path '*/services/*' \
+            | sort | sed 's|^./||' | tr '\n' ',')
+          SOURCES="${SOURCES%,}"  # strip trailing comma
+          echo "Mutation targets: $SOURCES"
+          if [ -z "$SOURCES" ]; then
+            echo "No Python source files found for mutation — skipping."
+            exit 0
+          fi
           mutmut run \
-            --paths-to-mutate hello.py \
+            --paths-to-mutate "$SOURCES" \
             --tests-dir . \
             --runner "python -m pytest" || true
 
