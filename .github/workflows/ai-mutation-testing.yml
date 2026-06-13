@@ -25,60 +25,11 @@ on:
         options:
           - main
           - develop
-
       mutation_scope:
         description: "Folder to scan for Python mutation targets"
         required: true
         type: string
         default: agent
-
-      run_lint:
-        description: "Run lint stage"
-        required: true
-        type: boolean
-        default: true
-
-      run_unit_tests:
-        description: "Run Python unit tests"
-        required: true
-        type: boolean
-        default: true
-
-      run_c_tests:
-        description: "Run C compile & test"
-        required: true
-        type: boolean
-        default: true
-
-      run_cpp_tests:
-        description: "Run C++ compile & test"
-        required: true
-        type: boolean
-        default: true
-
-      run_api_service:
-        description: "Run FastAPI smoke test"
-        required: true
-        type: boolean
-        default: true
-
-      run_grafana:
-        description: "Run Grafana dashboard stage"
-        required: true
-        type: boolean
-        default: true
-
-      run_mutation:
-        description: "Run mutation testing"
-        required: true
-        type: boolean
-        default: true
-
-      run_e2e:
-        description: "Run full E2E orchestration"
-        required: true
-        type: boolean
-        default: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -88,63 +39,62 @@ env:
   GRAFANA_USER: "admin"
   GRAFANA_PASSWORD: "admin"
 
+permissions:
+  contents: read
+
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # JOB 1 — Lint & Static Analysis
+  # JOB 1 — Lint (non-blocking, report only)
   # ─────────────────────────────────────────────────────────────
   lint:
-    name: "1 · Lint & Static Analysis"
+    name: "1 · Lint (Non-Blocking)"
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lint }}
 
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Debug trigger inputs
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref_name=${{ github.ref_name }}"
-          echo "head_ref=${{ github.head_ref }}"
-          echo "target_branch=${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'auto' }}"
-          echo "mutation_scope=${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install lint tools
+      - name: Install flake8
         run: |
           pip install flake8 flake8-bugbear flake8-html
 
       - name: Generate flake8 HTML report
+        shell: bash
         run: |
           mkdir -p reports/flake8-html
 
-          PY_FILES=$(find agent -type f -name '*.py' | sort | tr '\n' ' ')
-          ROOT_PY=$(find . -maxdepth 1 -type f -name '*.py' | sort | tr '\n' ' ')
+          PY_FILES=$(find agent -type f -name '*.py' 2>/dev/null | sort | tr '\n' ' ')
+          ROOT_PY=$(find . -maxdepth 1 -type f -name '*.py' 2>/dev/null | sort | tr '\n' ' ')
 
           if [ -z "$PY_FILES$ROOT_PY" ]; then
-            cat > reports/flake8-html/index.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Flake8 Report</title></head>
-            <body><h1>No Python files found to lint.</h1></body>
-            </html>
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("reports/flake8-html/index.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Flake8 Report</title></head>
+<body><h1>No Python files found to lint.</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+PY
             exit 0
           fi
 
@@ -155,9 +105,9 @@ jobs:
             --htmldir=reports/flake8-html \
             --statistics || true
 
-      - name: Upload lint report
+      - name: Upload flake8 report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: flake8-html
           path: reports/flake8-html/
@@ -170,7 +120,6 @@ jobs:
     name: "2 · Python Unit Tests"
     runs-on: ubuntu-latest
     needs: lint
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_unit_tests) }}
 
     outputs:
       total: ${{ steps.metrics.outputs.total }}
@@ -182,19 +131,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -202,7 +151,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest-html junit2html
+          pip install pytest pytest-html junit2html
 
       - name: Create reports directory
         run: mkdir -p reports
@@ -220,13 +169,17 @@ jobs:
 
           if [ ! -s reports/pytest-files.txt ]; then
             echo "No Python test files found under agent/"
-            cat > reports/pytest-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Pytest Report</title></head>
-            <body><h1>No Python test files found under agent/</h1></body>
-            </html>
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("reports/pytest-report.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Pytest Report</title></head>
+<body><h1>No Python test files found under agent/</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+PY
             echo "0" > reports/pytest-exit-code.txt
             exit 0
           fi
@@ -248,47 +201,51 @@ jobs:
           if [ -f reports/pytest-results.xml ]; then
             junit2html reports/pytest-results.xml reports/pytest-junit-report.html || true
           else
-            cat > reports/pytest-junit-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>JUnit Report</title></head>
-            <body><h1>No JUnit XML generated.</h1></body>
-            </html>
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("reports/pytest-junit-report.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>JUnit Report</title></head>
+<body><h1>No JUnit XML generated.</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+PY
           fi
 
       - name: Parse pytest metrics
         id: metrics
         run: |
           python - <<'PY'
-          import os
-          import xml.etree.ElementTree as ET
+import os
+import xml.etree.ElementTree as ET
 
-          total = passed = failed = errors = skipped = 0
+total = passed = failed = errors = skipped = 0
 
-          xml_file = "reports/pytest-results.xml"
-          if os.path.exists(xml_file):
-              root = ET.parse(xml_file).getroot()
-              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
-              for suite in suites:
-                  total += int(suite.attrib.get("tests", 0))
-                  failed += int(suite.attrib.get("failures", 0))
-                  errors += int(suite.attrib.get("errors", 0))
-                  skipped += int(suite.attrib.get("skipped", 0))
+xml_file = "reports/pytest-results.xml"
+if os.path.exists(xml_file):
+    root = ET.parse(xml_file).getroot()
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    for suite in suites:
+        total += int(suite.attrib.get("tests", 0))
+        failed += int(suite.attrib.get("failures", 0))
+        errors += int(suite.attrib.get("errors", 0))
+        skipped += int(suite.attrib.get("skipped", 0))
 
-          passed = max(total - failed - errors - skipped, 0)
+passed = max(total - failed - errors - skipped, 0)
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"total={total}\n")
-              f.write(f"passed={passed}\n")
-              f.write(f"failed={failed}\n")
-              f.write(f"errors={errors}\n")
-              f.write(f"skipped={skipped}\n")
-          PY
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+    f.write(f"total={total}\n")
+    f.write(f"passed={passed}\n")
+    f.write(f"failed={failed}\n")
+    f.write(f"errors={errors}\n")
+    f.write(f"skipped={skipped}\n")
+PY
 
       - name: Upload pytest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pytest-html
           path: |
@@ -297,14 +254,13 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3A — C Compile & Test
+  # JOB 3 — C Compile & Test
   # ─────────────────────────────────────────────────────────────
   c_tests:
-    name: "3A · C Compile & Test"
+    name: "3 · C Compile & Test"
     runs-on: ubuntu-latest
     needs: lint
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_c_tests) }}
 
     outputs:
       files: ${{ steps.metrics.outputs.files }}
@@ -316,14 +272,14 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -416,39 +372,39 @@ jobs:
       - name: Generate C HTML report
         run: |
           python - <<'PY'
-          import html
-          from pathlib import Path
+import html
+from pathlib import Path
 
-          log_path = Path("reports/c-build.log")
-          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C build log found."
+log_path = Path("reports/c-build.log")
+content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C build log found."
 
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>C Build Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{
-                background: #111827;
-                color: #f9fafb;
-                padding: 16px;
-                border-radius: 8px;
-                white-space: pre-wrap;
-              }}
-            </style>
-          </head>
-          <body>
-            <h1>C Build & Test Report</h1>
-            <pre>{html.escape(content)}</pre>
-          </body>
-          </html>"""
-          Path("reports/c-report.html").write_text(report, encoding="utf-8")
-          PY
+report = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>C Build Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    pre {{
+      background: #111827;
+      color: #f9fafb;
+      padding: 16px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+    }}
+  </style>
+</head>
+<body>
+  <h1>C Build & Test Report</h1>
+  <pre>{html.escape(content)}</pre>
+</body>
+</html>"""
+Path("reports/c-report.html").write_text(report, encoding="utf-8")
+PY
 
       - name: Upload C report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: c-html
           path: |
@@ -457,14 +413,13 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3B — C++ Compile & Test
+  # JOB 4 — C++ Compile & Test
   # ─────────────────────────────────────────────────────────────
   cpp_tests:
-    name: "3B · C++ Compile & Test"
+    name: "4 · C++ Compile & Test"
     runs-on: ubuntu-latest
     needs: lint
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests) }}
 
     outputs:
       files: ${{ steps.metrics.outputs.files }}
@@ -476,14 +431,14 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -581,39 +536,39 @@ jobs:
       - name: Generate C++ HTML report
         run: |
           python - <<'PY'
-          import html
-          from pathlib import Path
+import html
+from pathlib import Path
 
-          log_path = Path("reports/cpp-build.log")
-          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C++ build log found."
+log_path = Path("reports/cpp-build.log")
+content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C++ build log found."
 
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>C++ Build Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{
-                background: #111827;
-                color: #f9fafb;
-                padding: 16px;
-                border-radius: 8px;
-                white-space: pre-wrap;
-              }}
-            </style>
-          </head>
-          <body>
-            <h1>C++ Build & Test Report</h1>
-            <pre>{html.escape(content)}</pre>
-          </body>
-          </html>"""
-          Path("reports/cpp-report.html").write_text(report, encoding="utf-8")
-          PY
+report = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>C++ Build Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    pre {{
+      background: #111827;
+      color: #f9fafb;
+      padding: 16px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+    }}
+  </style>
+</head>
+<body>
+  <h1>C++ Build & Test Report</h1>
+  <pre>{html.escape(content)}</pre>
+</body>
+</html>"""
+Path("reports/cpp-report.html").write_text(report, encoding="utf-8")
+PY
 
       - name: Upload C++ report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-html
           path: |
@@ -622,30 +577,29 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 4 — FastAPI Service Smoke Test
+  # JOB 5 — FastAPI Service Smoke Test
   # ─────────────────────────────────────────────────────────────
   api_service:
-    name: "4 · FastAPI Service Health & Smoke"
+    name: "5 · FastAPI Service Health & Smoke"
     runs-on: ubuntu-latest
     needs: unit_tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_api_service) }}
 
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -698,9 +652,13 @@ jobs:
         shell: bash
         run: |
           if [ -z "${{ steps.discover.outputs.source_file }}" ] || [ -z "${{ steps.discover.outputs.test_file }}" ]; then
-            cat > reports/mutate-response.json <<'EOF'
-            {"info": "Skipping /mutate smoke test because no source file or test file was discovered under agent/."}
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("reports/mutate-response.json").write_text(
+    '{"info": "Skipping /mutate smoke test because no source file or test file was discovered under agent/."}',
+    encoding="utf-8"
+)
+PY
             exit 0
           fi
 
@@ -719,49 +677,49 @@ jobs:
       - name: Generate API HTML report
         run: |
           python - <<'PY'
-          import json
-          import html
-          from pathlib import Path
+import json
+import html
+from pathlib import Path
 
-          def read_json(path):
-              p = Path(path)
-              if not p.exists():
-                  return {"error": f"{path} not found"}
-              try:
-                  return json.loads(p.read_text(encoding="utf-8"))
-              except Exception as e:
-                  return {"error": str(e)}
+def read_json(path):
+    p = Path(path)
+    if not p.exists():
+        return {"error": f"{path} not found"}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": str(e)}
 
-          mutate = read_json("reports/mutate-response.json")
-          sessions = read_json("reports/sessions-response.json")
-          fastapi_log = Path("reports/fastapi.log").read_text(encoding="utf-8", errors="ignore") if Path("reports/fastapi.log").exists() else "No FastAPI log found."
+mutate = read_json("reports/mutate-response.json")
+sessions = read_json("reports/sessions-response.json")
+fastapi_log = Path("reports/fastapi.log").read_text(encoding="utf-8", errors="ignore") if Path("reports/fastapi.log").exists() else "No FastAPI log found."
 
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>FastAPI Smoke Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
-            </style>
-          </head>
-          <body>
-            <h1>FastAPI Smoke Test Report</h1>
-            <h2>POST /mutate</h2>
-            <pre>{html.escape(json.dumps(mutate, indent=2))}</pre>
-            <h2>GET /sessions</h2>
-            <pre>{html.escape(json.dumps(sessions, indent=2))}</pre>
-            <h2>FastAPI Log</h2>
-            <pre>{html.escape(fastapi_log)}</pre>
-          </body>
-          </html>"""
-          Path("reports/api-report.html").write_text(report, encoding="utf-8")
-          PY
+report = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>FastAPI Smoke Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
+  </style>
+</head>
+<body>
+  <h1>FastAPI Smoke Test Report</h1>
+  <h2>POST /mutate</h2>
+  <pre>{html.escape(json.dumps(mutate, indent=2))}</pre>
+  <h2>GET /sessions</h2>
+  <pre>{html.escape(json.dumps(sessions, indent=2))}</pre>
+  <h2>FastAPI Log</h2>
+  <pre>{html.escape(fastapi_log)}</pre>
+</body>
+</html>"""
+Path("reports/api-report.html").write_text(report, encoding="utf-8")
+PY
 
       - name: Upload API report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: api-html
           path: |
@@ -773,16 +731,15 @@ jobs:
         run: kill $SERVICE_PID || true
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 5 — Mutation Testing
+  # JOB 6 — Mutation Testing
   # ─────────────────────────────────────────────────────────────
   mutation_run:
-    name: "5 · Mutation Testing (mutmut + AI Agents)"
+    name: "6 · Mutation Testing (mutmut + AI Agents)"
     runs-on: ubuntu-latest
     needs:
       - unit_tests
       - c_tests
       - cpp_tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_mutation) }}
 
     outputs:
       killed: ${{ steps.metrics.outputs.killed }}
@@ -796,19 +753,19 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -838,34 +795,23 @@ jobs:
       - name: Generate mutmut config dynamically
         run: |
           python - <<'PY'
-          from pathlib import Path
-          import os
+from pathlib import Path
 
-          scope = "${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-          test_file_list = Path("reports/pytest-files.txt")
-          cfg_lines = ["[mutmut]"]
-          cfg_lines.append("source_paths=")
-          cfg_lines.append(f"    {scope}")
-          cfg_lines.append("pytest_add_cli_args_test_selection=")
+scope = "${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
+cfg_lines = ["[mutmut]"]
+cfg_lines.append("source_paths=")
+cfg_lines.append(f"    {scope}")
+cfg_lines.append("pytest_add_cli_args_test_selection=")
+cfg_lines.append("    agent")
+cfg_lines.append("do_not_mutate=")
+cfg_lines.append("    */test_*.py")
+cfg_lines.append("    */*_test.py")
+cfg_lines.append("    */__init__.py")
+cfg_lines.append("    */conftest.py")
 
-          test_txt = Path("reports/pytest-files.txt")
-          if test_txt.exists() and test_txt.read_text(encoding="utf-8").strip():
-              for line in test_txt.read_text(encoding="utf-8").splitlines():
-                  line = line.strip()
-                  if line:
-                      cfg_lines.append(f"    {line}")
-          else:
-              cfg_lines.append("    agent")
-
-          cfg_lines.append("do_not_mutate=")
-          cfg_lines.append("    */test_*.py")
-          cfg_lines.append("    */*_test.py")
-          cfg_lines.append("    */__init__.py")
-          cfg_lines.append("    */conftest.py")
-
-          Path("setup.cfg").write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
-          print(Path("setup.cfg").read_text(encoding="utf-8"))
-          PY
+Path("setup.cfg").write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
+print(Path("setup.cfg").read_text(encoding="utf-8"))
+PY
 
       - name: Run mutmut
         shell: bash
@@ -873,22 +819,27 @@ jobs:
           set +e
 
           if [ ! -s reports/mutation-candidates.txt ]; then
-            echo "No mutation candidates discovered." > reports/mutmut-results.txt
-            cat > reports/mutation-summary.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Mutation Summary</title></head>
-            <body><h1>No mutation candidates discovered.</h1></body>
-            </html>
-            EOF
-            mkdir -p reports/mutmut-report
-            cat > reports/mutmut-report/index.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Mutmut HTML</title></head>
-            <body><h1>No mutation candidates discovered.</h1></body>
-            </html>
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("reports/mutmut-results.txt").write_text("No mutation candidates discovered.\n", encoding="utf-8")
+Path("reports/mutation-summary.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Mutation Summary</title></head>
+<body><h1>No mutation candidates discovered.</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+Path("reports/mutmut-report/index.html").parent.mkdir(parents=True, exist_ok=True)
+Path("reports/mutmut-report/index.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Mutmut HTML</title></head>
+<body><h1>No mutation candidates discovered.</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+PY
             exit 0
           fi
 
@@ -914,81 +865,81 @@ jobs:
         id: metrics
         run: |
           python - <<'PY'
-          import os
-          from collections import Counter
+import os
+from collections import Counter
 
-          results_file = "reports/mutmut-results.txt"
-          statuses = Counter({
-              "killed": 0,
-              "survived": 0,
-              "timeout": 0,
-              "suspicious": 0,
-              "skipped": 0,
-              "no tests": 0,
-              "not checked": 0,
-              "segfault": 0
-          })
+results_file = "reports/mutmut-results.txt"
+statuses = Counter({
+    "killed": 0,
+    "survived": 0,
+    "timeout": 0,
+    "suspicious": 0,
+    "skipped": 0,
+    "no tests": 0,
+    "not checked": 0,
+    "segfault": 0
+})
 
-          if os.path.exists(results_file):
-              with open(results_file, encoding="utf-8", errors="ignore") as f:
-                  for raw in f:
-                      line = raw.strip().lower()
-                      if not line:
-                          continue
-                      for status in list(statuses.keys()):
-                          if line.endswith(status) or f": {status}" in line:
-                              statuses[status] += 1
-                              break
+if os.path.exists(results_file):
+    with open(results_file, encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip().lower()
+            if not line:
+                continue
+            for status in list(statuses.keys()):
+                if line.endswith(status) or f": {status}" in line:
+                    statuses[status] += 1
+                    break
 
-          considered = (
-              statuses["killed"]
-              + statuses["survived"]
-              + statuses["timeout"]
-              + statuses["suspicious"]
-              + statuses["no tests"]
-              + statuses["segfault"]
-          )
-          mutation_score = round((statuses["killed"] / considered) * 100, 2) if considered else 0.0
+considered = (
+    statuses["killed"]
+    + statuses["survived"]
+    + statuses["timeout"]
+    + statuses["suspicious"]
+    + statuses["no tests"]
+    + statuses["segfault"]
+)
+mutation_score = round((statuses["killed"] / considered) * 100, 2) if considered else 0.0
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"killed={statuses['killed']}\n")
-              f.write(f"survived={statuses['survived']}\n")
-              f.write(f"timeout={statuses['timeout']}\n")
-              f.write(f"suspicious={statuses['suspicious']}\n")
-              f.write(f"no_tests={statuses['no tests']}\n")
-              f.write(f"considered={considered}\n")
-              f.write(f"mutation_score={mutation_score}\n")
-          PY
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+    f.write(f"killed={statuses['killed']}\n")
+    f.write(f"survived={statuses['survived']}\n")
+    f.write(f"timeout={statuses['timeout']}\n")
+    f.write(f"suspicious={statuses['suspicious']}\n")
+    f.write(f"no_tests={statuses['no tests']}\n")
+    f.write(f"considered={considered}\n")
+    f.write(f"mutation_score={mutation_score}\n")
+PY
 
       - name: Generate mutation summary HTML
         run: |
           python - <<'PY'
-          import html
-          from pathlib import Path
+import html
+from pathlib import Path
 
-          summary = Path("reports/mutmut-results.txt").read_text(encoding="utf-8", errors="ignore") if Path("reports/mutmut-results.txt").exists() else "No mutmut summary found."
+summary = Path("reports/mutmut-results.txt").read_text(encoding="utf-8", errors="ignore") if Path("reports/mutmut-results.txt").exists() else "No mutmut summary found."
 
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Mutation Summary</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
-            </style>
-          </head>
-          <body>
-            <h1>Mutation Testing Summary</h1>
-            <pre>{html.escape(summary)}</pre>
-          </body>
-          </html>"""
-          Path("reports/mutation-summary.html").write_text(report, encoding="utf-8")
-          PY
+report = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Mutation Summary</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
+  </style>
+</head>
+<body>
+  <h1>Mutation Testing Summary</h1>
+  <pre>{html.escape(summary)}</pre>
+</body>
+</html>"""
+Path("reports/mutation-summary.html").write_text(report, encoding="utf-8")
+PY
 
       - name: Upload mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mutation-html
           path: |
@@ -997,10 +948,10 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 6 — Grafana Dashboard
+  # JOB 7 — Grafana Dashboard
   # ─────────────────────────────────────────────────────────────
   grafana_update:
-    name: "6 · Grafana Dashboard"
+    name: "7 · Grafana Dashboard"
     runs-on: ubuntu-latest
     needs:
       - unit_tests
@@ -1008,24 +959,23 @@ jobs:
       - cpp_tests
       - mutation_run
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_grafana) }}
 
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
 
@@ -1077,7 +1027,7 @@ jobs:
                   "gridPos": { "h": 18, "w": 24, "x": 0, "y": 0 },
                   "options": {
                     "mode": "markdown",
-                    "content": "## AI Mutation Testing Dashboard\n\n**Pytest**\n- Total: **${{ needs.unit_tests.outputs.total }}**\n- Passed: **${{ needs.unit_tests.outputs.passed }}**\n- Failed: **${{ needs.unit_tests.outputs.failed }}**\n- Errors: **${{ needs.unit_tests.outputs.errors }}**\n- Skipped: **${{ needs.unit_tests.outputs.skipped }}**\n\n**C**\n- Files: **${{ needs.c_tests.outputs.files }}**\n- Compile pass: **${{ needs.c_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.c_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.c_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.c_tests.outputs.run_fail }}**\n\n**C++**\n- Files: **${{ needs.cpp_tests.outputs.files }}**\n- Compile pass: **${{ needs.cpp_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.cpp_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.cpp_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.cpp_tests.outputs.run_fail }}**\n\n**Mutation**\n- Killed: **${{ needs.mutation_run.outputs.killed }}**\n- Survived: **${{ needs.mutation_run.outputs.survived }}**\n- No tests: **${{ needs.mutation_run.outputs.no_tests }}**\n- Timeout: **${{ needs.mutation_run.outputs.timeout }}**\n- Suspicious: **${{ needs.mutation_run.outputs.suspicious }}**\n- Considered: **${{ needs.mutation_run.outputs.considered }}**\n- Real Mutation Score: **${{ needs.mutation_run.outputs.mutation_score }}%**"
+                    "content": "## AI Mutation Testing Dashboard\n\n**Pytest**\n- Total: **${{ needs.unit_tests.outputs.total || '0' }}**\n- Passed: **${{ needs.unit_tests.outputs.passed || '0' }}**\n- Failed: **${{ needs.unit_tests.outputs.failed || '0' }}**\n- Errors: **${{ needs.unit_tests.outputs.errors || '0' }}**\n- Skipped: **${{ needs.unit_tests.outputs.skipped || '0' }}**\n\n**C**\n- Files: **${{ needs.c_tests.outputs.files || '0' }}**\n- Compile pass: **${{ needs.c_tests.outputs.compile_pass || '0' }}**\n- Compile fail: **${{ needs.c_tests.outputs.compile_fail || '0' }}**\n- Run pass: **${{ needs.c_tests.outputs.run_pass || '0' }}**\n- Run fail: **${{ needs.c_tests.outputs.run_fail || '0' }}**\n\n**C++**\n- Files: **${{ needs.cpp_tests.outputs.files || '0' }}**\n- Compile pass: **${{ needs.cpp_tests.outputs.compile_pass || '0' }}**\n- Compile fail: **${{ needs.cpp_tests.outputs.compile_fail || '0' }}**\n- Run pass: **${{ needs.cpp_tests.outputs.run_pass || '0' }}**\n- Run fail: **${{ needs.cpp_tests.outputs.run_fail || '0' }}**\n\n**Mutation**\n- Killed: **${{ needs.mutation_run.outputs.killed || '0' }}**\n- Survived: **${{ needs.mutation_run.outputs.survived || '0' }}**\n- No tests: **${{ needs.mutation_run.outputs.no_tests || '0' }}**\n- Timeout: **${{ needs.mutation_run.outputs.timeout || '0' }}**\n- Suspicious: **${{ needs.mutation_run.outputs.suspicious || '0' }}**\n- Considered: **${{ needs.mutation_run.outputs.considered || '0' }}**\n- Real Mutation Score: **${{ needs.mutation_run.outputs.mutation_score || '0' }}%**"
                   }
                 }
               ]
@@ -1094,26 +1044,25 @@ jobs:
       - name: Resolve dashboard URL
         run: |
           python - <<'PY' >> $GITHUB_ENV
-          import json
-          import os
-          from pathlib import Path
+import json
+from pathlib import Path
 
-          default_url = "http://127.0.0.1:3000/d/ai-mutation-dashboard/ai-mutation-dashboard?orgId=1&kiosk"
+default_url = "http://127.0.0.1:3000/d/ai-mutation-dashboard/ai-mutation-dashboard?orgId=1&kiosk"
 
-          p = Path("reports/grafana-create-response.json")
-          if p.exists():
-              try:
-                  data = json.loads(p.read_text(encoding="utf-8"))
-                  url = data.get("url")
-                  if url:
-                      print(f"DASHBOARD_URL=http://127.0.0.1:3000{url}?orgId=1&kiosk")
-                  else:
-                      print(f"DASHBOARD_URL={default_url}")
-              except Exception:
-                  print(f"DASHBOARD_URL={default_url}")
-          else:
-              print(f"DASHBOARD_URL={default_url}")
-          PY
+p = Path("reports/grafana-create-response.json")
+if p.exists():
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        url = data.get("url")
+        if url:
+            print(f"DASHBOARD_URL=http://127.0.0.1:3000{url}?orgId=1&kiosk")
+        else:
+            print(f"DASHBOARD_URL={default_url}")
+    except Exception:
+        print(f"DASHBOARD_URL={default_url}")
+else:
+    print(f"DASHBOARD_URL={default_url}")
+PY
 
       - name: Install Playwright
         run: |
@@ -1148,31 +1097,30 @@ jobs:
       - name: Generate Grafana HTML report
         run: |
           python - <<'PY'
-          from pathlib import Path
+from pathlib import Path
 
-          report = """<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Grafana Dashboard</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 24px; }
-              img { max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; }
-            </style>
-          </head>
-          <body>
-            <h1>Grafana Dashboard</h1>
-            <p>Captured during workflow execution.</p>
-            <img src="grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
-          </body>
-          </html>"""
-
-          Path("reports/grafana-report.html").write_text(report, encoding="utf-8")
-          PY
+report = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Grafana Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    img { max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Grafana Dashboard</h1>
+  <p>Captured during workflow execution.</p>
+  <img src="grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
+</body>
+</html>"""
+Path("reports/grafana-report.html").write_text(report, encoding="utf-8")
+PY
 
       - name: Upload Grafana report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: grafana-html
           path: |
@@ -1187,33 +1135,32 @@ jobs:
           docker rm grafana || true
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 7 — Full End-to-End Orchestration
+  # JOB 8 — E2E / Orchestration
   # ─────────────────────────────────────────────────────────────
   e2e_verify:
-    name: "7 · Full E2E Orchestration (run_all.py)"
+    name: "8 · Full E2E Orchestration (run_all.py)"
     runs-on: ubuntu-latest
     needs:
       - api_service
       - mutation_run
       - grafana_update
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_e2e) }}
 
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
 
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -1230,43 +1177,46 @@ jobs:
       - name: Create fallback E2E HTML if missing
         run: |
           if [ ! -f baseline-report.html ]; then
-            cat > baseline-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>E2E Report</title></head>
-            <body><h1>baseline-report.html was not generated.</h1></body>
-            </html>
-            EOF
+            python - <<'PY'
+from pathlib import Path
+Path("baseline-report.html").write_text(
+    """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>E2E Report</title></head>
+<body><h1>baseline-report.html was not generated.</h1></body>
+</html>""",
+    encoding="utf-8"
+)
+PY
           fi
 
       - name: Upload E2E report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-html
           path: baseline-report.html
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 8 — Final Combined HTML Report
+  # JOB 9 — Final Combined HTML Report
   # ─────────────────────────────────────────────────────────────
   report:
-    name: "8 · Final HTML Report"
+    name: "9 · Final HTML Report"
     runs-on: ubuntu-latest
     needs:
-      - lint
       - unit_tests
       - c_tests
       - cpp_tests
       - api_service
-      - grafana_update
       - mutation_run
+      - grafana_update
       - e2e_verify
     if: always()
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-reports
 
@@ -1274,7 +1224,6 @@ jobs:
         run: |
           mkdir -p final-report/assets
 
-          cp -r all-reports/flake8-html final-report/assets/ || true
           cp -r all-reports/pytest-html final-report/assets/ || true
           cp -r all-reports/c-html final-report/assets/ || true
           cp -r all-reports/cpp-html final-report/assets/ || true
@@ -1287,135 +1236,133 @@ jobs:
         run: |
           if [ ! -f final-report/assets/grafana-html/grafana-dashboard.png ]; then
             python - <<'PY'
-            from PIL import Image, ImageDraw
-            from pathlib import Path
+from PIL import Image, ImageDraw
+from pathlib import Path
 
-            out = Path("final-report/assets/grafana-html")
-            out.mkdir(parents=True, exist_ok=True)
+out = Path("final-report/assets/grafana-html")
+out.mkdir(parents=True, exist_ok=True)
 
-            img = Image.new("RGB", (1400, 700), color="white")
-            draw = ImageDraw.Draw(img)
-            draw.text((40, 40), "Grafana screenshot not available.", fill="black")
-            img.save(out / "grafana-dashboard.png")
+img = Image.new("RGB", (1400, 700), color="white")
+draw = ImageDraw.Draw(img)
+draw.text((40, 40), "Grafana screenshot not available.", fill="black")
+img.save(out / "grafana-dashboard.png")
 
-            html = """<!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Grafana Dashboard</title></head>
-            <body><h1>Grafana screenshot not available.</h1></body>
-            </html>"""
-            (out / "grafana-report.html").write_text(html, encoding="utf-8")
-            PY
+html = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Grafana Dashboard</title></head>
+<body><h1>Grafana screenshot not available.</h1></body>
+</html>"""
+(out / "grafana-report.html").write_text(html, encoding="utf-8")
+PY
           fi
 
       - name: Build final index.html
         run: |
           python - <<'PY'
-          from pathlib import Path
+from pathlib import Path
 
-          html = """<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>AI Mutation Testing - Final Report</title>
-            <style>
-              body {
-                font-family: Arial, sans-serif;
-                margin: 24px;
-                background: #f9fafb;
-                color: #111827;
-              }
-              h1, h2 {
-                color: #111827;
-              }
-              .card {
-                background: white;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-                padding: 16px;
-                margin-bottom: 20px;
-                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-              }
-              a {
-                color: #2563eb;
-                text-decoration: none;
-              }
-              a:hover {
-                text-decoration: underline;
-              }
-              img {
-                max-width: 100%;
-                border-radius: 8px;
-                border: 1px solid #d1d5db;
-              }
-              iframe {
-                width: 100%;
-                height: 700px;
-                border: 1px solid #d1d5db;
-                border-radius: 8px;
-                background: white;
-              }
-              ul {
-                line-height: 1.8;
-              }
-            </style>
-          </head>
-          <body>
-            <h1>AI Mutation Testing - Final HTML Report</h1>
+html = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI Mutation Testing - Final Report</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 24px;
+      background: #f9fafb;
+      color: #111827;
+    }
+    h1, h2 {
+      color: #111827;
+    }
+    .card {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    img {
+      max-width: 100%;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
+    }
+    iframe {
+      width: 100%;
+      height: 700px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background: white;
+    }
+    ul {
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+  <h1>AI Mutation Testing - Final HTML Report</h1>
 
-            <div class="card">
-              <h2>Quick Links</h2>
-              <ul>
-                <li><a href="assets/flake8-html/index.html">Lint HTML Report</a></li>
-                <li><a href="assets/pytest-html/pytest-report.html">Pytest HTML Report</a></li>
-                <li><a href="assets/pytest-html/pytest-junit-report.html">Converted JUnit HTML Report</a></li>
-                <li><a href="assets/c-html/c-report.html">C HTML Report</a></li>
-                <li><a href="assets/cpp-html/cpp-report.html">C++ HTML Report</a></li>
-                <li><a href="assets/api-html/api-report.html">FastAPI Smoke HTML Report</a></li>
-                <li><a href="assets/mutation-html/mutation-summary.html">Mutation Summary HTML</a></li>
-                <li><a href="assets/mutation-html/mutmut-report/index.html">Full mutmut HTML Report</a></li>
-                <li><a href="assets/e2e-html/baseline-report.html">E2E Baseline HTML Report</a></li>
-                <li><a href="assets/grafana-html/grafana-report.html">Grafana HTML View</a></li>
-              </ul>
-            </div>
+  <div class="card">
+    <h2>Quick Links</h2>
+    <ul>
+      <li><a href="assets/pytest-html/pytest-report.html">Pytest HTML Report</a></li>
+      <li><a href="assets/pytest-html/pytest-junit-report.html">Converted JUnit HTML Report</a></li>
+      <li><a href="assets/c-html/c-report.html">C HTML Report</a></li>
+      <li><a href="assets/cpp-html/cpp-report.html">C++ HTML Report</a></li>
+      <li><a href="assets/api-html/api-report.html">FastAPI Smoke HTML Report</a></li>
+      <li><a href="assets/mutation-html/mutation-summary.html">Mutation Summary HTML</a></li>
+      <li><a href="assets/mutation-html/mutmut-report/index.html">Full mutmut HTML Report</a></li>
+      <li><a href="assets/e2e-html/baseline-report.html">E2E Baseline HTML Report</a></li>
+      <li><a href="assets/grafana-html/grafana-report.html">Grafana HTML View</a></li>
+    </ul>
+  </div>
 
-            <div class="card">
-              <h2>Grafana Dashboard Preview</h2>
-              <img src="assets/grafana-html/grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
-            </div>
+  <div class="card">
+    <h2>Grafana Dashboard Preview</h2>
+    <img src="assets/grafana-html/grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
+  </div>
 
-            <div class="card">
-              <h2>Pytest Report Preview</h2>
-              <iframe src="assets/pytest-html/pytest-report.html"></iframe>
-            </div>
+  <div class="card">
+    <h2>Pytest Report Preview</h2>
+    <iframe src="assets/pytest-html/pytest-report.html"></iframe>
+  </div>
 
-            <div class="card">
-              <h2>C Report Preview</h2>
-              <iframe src="assets/c-html/c-report.html"></iframe>
-            </div>
+  <div class="card">
+    <h2>C Report Preview</h2>
+    <iframe src="assets/c-html/c-report.html"></iframe>
+  </div>
 
-            <div class="card">
-              <h2>C++ Report Preview</h2>
-              <iframe src="assets/cpp-html/cpp-report.html"></iframe>
-            </div>
+  <div class="card">
+    <h2>C++ Report Preview</h2>
+    <iframe src="assets/cpp-html/cpp-report.html"></iframe>
+  </div>
 
-            <div class="card">
-              <h2>FastAPI Smoke Report Preview</h2>
-              <iframe src="assets/api-html/api-report.html"></iframe>
-            </div>
+  <div class="card">
+    <h2>FastAPI Smoke Report Preview</h2>
+    <iframe src="assets/api-html/api-report.html"></iframe>
+  </div>
 
-            <div class="card">
-              <h2>Mutation Summary Preview</h2>
-              <iframe src="assets/mutation-html/mutation-summary.html"></iframe>
-            </div>
-          </body>
-          </html>
-          """
-
-          Path("final-report/index.html").write_text(html, encoding="utf-8")
-          PY
+  <div class="card">
+    <h2>Mutation Summary Preview</h2>
+    <iframe src="assets/mutation-html/mutation-summary.html"></iframe>
+  </div>
+</body>
+</html>
+"""
+Path("final-report/index.html").write_text(html, encoding="utf-8")
+PY
 
       - name: Upload final HTML report bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: final-html-report
           path: final-report/
