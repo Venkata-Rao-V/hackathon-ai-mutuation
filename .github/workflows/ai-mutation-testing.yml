@@ -55,7 +55,6 @@ on:
         default: true
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PYTHON_VERSION: "3.11"
 
 permissions:
@@ -454,7 +453,7 @@ jobs:
       #
       # We do NOT set "runner" — providing a custom runner caused pytest exit code 5
       # ("no tests collected") on every mutant because the path was unresolvable.
-      # mutmut builds its own correct pytest command from tests_dirs instead.
+      # mutmut builds its own correct pytest command from tests_dir.
       #
       # Heredoc MUST start at column 0. Leading spaces make INI keys unrecognised.
       - name: Determine scope and write setup.cfg [mutmut]
@@ -479,8 +478,8 @@ jobs:
           [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
           [ -z "$TEST_DIRS"  ] && TEST_DIRS="$SCOPE"
 
-          echo "source_paths : $SRC_PATHS"
-          echo "tests_dirs   : $TEST_DIRS"
+          echo "paths_to_mutate : $SRC_PATHS"
+          echo "tests_dir   : $TEST_DIRS"
 
           # Strip any existing [mutmut] block
           if [ -f setup.cfg ]; then
@@ -495,8 +494,12 @@ jobs:
           cat >> setup.cfg << CFG
 
           [mutmut]
-          source_paths = ${SRC_PATHS}
+          paths_to_mutate = ${SRC_PATHS}
+          tests_dir = ${TEST_DIRS}
           tests_dirs = ${TEST_DIRS}
+          max_stack_depth = 8
+          mutate_only_covered_lines = true
+          timeout_multiplier = 8.0
           CFG
 
           echo "=== setup.cfg [mutmut] ==="
@@ -509,6 +512,20 @@ jobs:
 
       - name: Clear mutmut cache
         run: rm -f .mutmut-cache
+
+      - name: Build pytest coverage map for mutmut
+        shell: bash
+        run: |
+          set +e
+          SCOPE="${{ steps.scope.outputs.scope }}"
+          # Coverage map lets mutmut skip uncovered lines and speed up mutant runs.
+          python -m pytest "$SCOPE" -q --maxfail=1 --disable-warnings \
+            --cov="$SCOPE" --cov-branch --cov-report=term-missing:skip-covered
+          PYTEST_EXIT=$?
+          if [ "$PYTEST_EXIT" -ne 0 ]; then
+            echo "Coverage warmup pytest exited with code $PYTEST_EXIT; continuing with mutmut."
+          fi
+          set -e
 
       - name: Debug — confirm files mutmut will see
         continue-on-error: true
@@ -539,9 +556,14 @@ jobs:
           mutmut junitxml > reports/mutmut-results.xml 2>/dev/null || true
 
           # Layer 1: result-ids subcommand
-          KILLED=$(mutmut result-ids killed   2>/dev/null | grep -c '[0-9]' || echo 0)
-          SURVIVED=$(mutmut result-ids survived 2>/dev/null | grep -c '[0-9]' || echo 0)
-          TIMEOUT=$(mutmut result-ids timeout  2>/dev/null | grep -c '[0-9]' || echo 0)
+          count_result_ids () {
+            local status="$1"
+            mutmut result-ids "$status" 2>/dev/null \
+              | awk '/^[0-9]+$/ { c++ } END { print c+0 }'
+          }
+          KILLED=$(count_result_ids killed)
+          SURVIVED=$(count_result_ids survived)
+          TIMEOUT=$(count_result_ids timeout)
           # Layer 2: summary line
           if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
             _K=$(grep -oP '\d+(?=\s+killed)'       reports/mutmut-run.log 2>/dev/null | tail -1)
