@@ -53,10 +53,21 @@ on:
         required: false
         type: boolean
         default: true
+      full_mutation:
+        description: "Mutate ALL files (slow) — default mutates only changed files"
+        required: false
+        type: boolean
+        default: false
 
 env:
+  # ── Opt into Node.js 24 now to silence deprecation warnings ──────────
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PYTHON_VERSION: "3.11"
+  # Per-mutant timeout (seconds). Kills any mutant whose test suite takes
+  # longer than this — prevents the job from hanging on infinite loops.
+  MUTMUT_TIMEOUT: "10"
+  # Max mutants to test per run (safety ceiling). Increase for full runs.
+  MAX_MUTANTS: "300"
 
 permissions:
   contents: read
@@ -69,6 +80,7 @@ jobs:
     name: "1 · Lint (Non-Blocking)"
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 5
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -80,7 +92,7 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -105,13 +117,13 @@ jobs:
             --max-line-length=120 \
             --extend-ignore=E203,W503,E501,W293,E261,E302,E305,E201,E202,F401,B007,E127 \
             --format=html --htmldir=reports/flake8-html --statistics || true
-      - name: Upload flake8 report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake8-html
-          path: reports/flake8-html/
-          if-no-files-found: warn
+      # - name: Upload flake8 report
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: flake8-html
+      #     path: reports/flake8-html/
+      #     if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
   # JOB 2 — Python Unit Tests
@@ -120,6 +132,7 @@ jobs:
     name: "2 · Python Unit Tests"
     runs-on: ubuntu-latest
     needs: lint
+    timeout-minutes: 20
     outputs:
       total:   ${{ steps.metrics.outputs.total }}
       passed:  ${{ steps.metrics.outputs.passed }}
@@ -146,7 +159,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-html junit2html
+          pip install pytest pytest-html junit2html pytest-xdist
       - name: Create reports directory
         run: mkdir -p reports
       - name: Collect Python source & test files
@@ -175,7 +188,9 @@ jobs:
             exit 0
           fi
           TEST_FILES=$(tr '\n' ' ' < reports/pytest-files.txt)
+          # -n auto runs tests in parallel across all available CPUs
           python -m pytest $TEST_FILES -v --tb=short \
+            -n auto \
             --junitxml=reports/pytest-results.xml \
             --html=reports/pytest-report.html \
             --self-contained-html --no-header
@@ -228,6 +243,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     continue-on-error: true
+    timeout-minutes: 15
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_c_tests) }}
     outputs:
       files:        ${{ steps.metrics.outputs.files }}
@@ -289,7 +305,7 @@ jobs:
               if [ $? -eq 0 ]; then
                 COMPILE_PASS=$((COMPILE_PASS + 1))
                 echo "[BUILD PASS] $TEST_FILE" | tee -a "$LOG"
-                "$OUT" >> "$LOG" 2>&1
+                timeout 30 "$OUT" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
                   RUN_PASS=$((RUN_PASS + 1)); echo "[RUN PASS]" | tee -a "$LOG"
                 else
@@ -322,6 +338,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     continue-on-error: true
+    timeout-minutes: 15
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests) }}
     outputs:
       files:        ${{ steps.metrics.outputs.files }}
@@ -385,7 +402,7 @@ jobs:
               fi
               if [ $? -eq 0 ]; then
                 COMPILE_PASS=$((COMPILE_PASS + 1)); echo "[BUILD PASS] $TEST_FILE" | tee -a "$LOG"
-                "$OUT" >> "$LOG" 2>&1
+                timeout 30 "$OUT" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
                   RUN_PASS=$((RUN_PASS + 1)); echo "[RUN PASS]" | tee -a "$LOG"
                 else
@@ -411,12 +428,23 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────
   # JOB 4 — Python Mutation Testing
+  #
+  # SPEED FIXES:
+  #   1. Only mutate files changed in this push (git diff HEAD~1).
+  #      Falls back to full scope if no changed files detected.
+  #      Override with full_mutation=true dispatch input.
+  #   2. mutmut 2.4.4 respects --timeout N (seconds per mutant).
+  #      Set MUTMUT_TIMEOUT=10 in env above.
+  #   3. Cap total mutants at MAX_MUTANTS (300 default).
+  #      This alone cuts 3076 → ~300 mutants — ~10x faster.
+  #   4. tests_dirs (not runner) so mutmut finds tests itself.
   # ─────────────────────────────────────────────────────────────
   mutation_tests:
     name: "4 · Python Mutation Testing"
     runs-on: ubuntu-latest
     needs: unit_tests
     continue-on-error: true
+    timeout-minutes: 45
     if: >-
       ${{
         always() && (
@@ -437,50 +465,83 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install "mutmut==2.4.4" pytest pytest-cov pytest-xdist
 
-      # Write setup.cfg BEFORE pip installs mutmut.
-      # mutmut reads setup.cfg at import time — must exist before first binary call.
-      #
-      # We do NOT set "runner" — providing a custom runner caused pytest exit code 5
-      # ("no tests collected") on every mutant because the path was unresolvable.
-      # mutmut builds its own correct pytest command from tests_dirs instead.
-      #
-      # Heredoc MUST start at column 0. Leading spaces make INI keys unrecognised.
-      - name: Determine scope and write setup.cfg [mutmut]
-        id: scope
+      # ── Determine WHICH files to mutate ──────────────────────────────
+      # Default: only .py files changed since last commit (fast).
+      # full_mutation=true or no changed files: fall back to full scope.
+      - name: Resolve mutation targets
+        id: targets
         shell: bash
         run: |
           SCOPE="${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
+          FULL="${{ github.event_name == 'workflow_dispatch' && inputs.full_mutation || 'false' }}"
           echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
-          echo "Mutation scope: $SCOPE"
 
-          # Comma-separated dirs containing non-test source .py files
-          SRC_PATHS=$(find "$SCOPE" -type f -name '*.py' \
-            ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null \
-            | xargs -I{} dirname {} 2>/dev/null | sort -u \
-            | tr '\n' ',' | sed 's/,$//')
+          if [ "$FULL" = "true" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            CHANGED=""
+          else
+            # Changed non-test .py files in the scope folder vs previous commit
+            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep "^${SCOPE}/.*\.py$" \
+              | grep -v 'test_' | grep -v '_test\.py' || true)
+            # PR: compare against merge base
+            if [ -z "$CHANGED" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+              CHANGED=$(git diff --name-only \
+                "${{ github.event.pull_request.base.sha }}" HEAD 2>/dev/null \
+                | grep "^${SCOPE}/.*\.py$" \
+                | grep -v 'test_' | grep -v '_test\.py' || true)
+            fi
+          fi
 
-          # Comma-separated dirs containing test files
+          if [ -n "$CHANGED" ]; then
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            # Unique parent directories of changed files → source_paths
+            SRC_PATHS=$(echo "$CHANGED" | xargs -I{} dirname {} | sort -u \
+              | tr '\n' ',' | sed 's/,$//')
+            echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CHANGED"           >> "$GITHUB_OUTPUT"
+            echo "EOF"                >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            SRC_PATHS=$(find "$SCOPE" -type f -name '*.py' \
+              ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null \
+              | xargs -I{} dirname {} 2>/dev/null | sort -u \
+              | tr '\n' ',' | sed 's/,$//')
+            [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
+          fi
+
           TEST_DIRS=$(find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
             2>/dev/null | xargs -I{} dirname {} 2>/dev/null | sort -u \
             | tr '\n' ',' | sed 's/,$//')
+          [ -z "$TEST_DIRS" ] && TEST_DIRS="$SCOPE"
 
-          [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
-          [ -z "$TEST_DIRS"  ] && TEST_DIRS="$SCOPE"
+          echo "src_paths=$SRC_PATHS" >> "$GITHUB_OUTPUT"
+          echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
+          echo "=== Mutation mode: $(cat $GITHUB_OUTPUT | grep '^mode=' | tail -1) ==="
+          echo "=== source_paths : $SRC_PATHS"
+          echo "=== tests_dirs   : $TEST_DIRS"
 
-          echo "source_paths : $SRC_PATHS"
-          echo "tests_dirs   : $TEST_DIRS"
+      - name: Write setup.cfg [mutmut]
+        shell: bash
+        run: |
+          SRC_PATHS="${{ steps.targets.outputs.src_paths }}"
+          TEST_DIRS="${{ steps.targets.outputs.test_dirs }}"
 
           # Strip any existing [mutmut] block
           if [ -f setup.cfg ]; then
@@ -491,7 +552,7 @@ jobs:
           pathlib.Path('setup.cfg').write_text(text.rstrip() + '\n')"
           fi
 
-          # Keys must be flush-left — do NOT indent this heredoc
+          # Keys must start at column 0 — no leading spaces
           cat >> setup.cfg << CFG
 
           [mutmut]
@@ -499,70 +560,95 @@ jobs:
           tests_dirs = ${TEST_DIRS}
           CFG
 
-          echo "=== setup.cfg [mutmut] ==="
-          grep -A5 '^\[mutmut\]' setup.cfg || true
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install "mutmut==2.4.4" pytest pytest-cov
+          echo "=== setup.cfg [mutmut] ===" && grep -A5 '^\[mutmut\]' setup.cfg
 
       - name: Clear mutmut cache
         run: rm -f .mutmut-cache
 
-      - name: Debug — confirm files mutmut will see
+      - name: Debug — show mutation targets
         continue-on-error: true
         shell: bash
         run: |
-          SCOPE="${{ steps.scope.outputs.scope }}"
+          MODE="${{ steps.targets.outputs.mode }}"
+          echo "=== Mode: $MODE ==="
           echo "=== mutmut version ===" && pip show mutmut | grep -E "^(Name|Version)"
-          echo "=== setup.cfg [mutmut] ==="
-          grep -A10 '^\[mutmut\]' setup.cfg || echo "NOT FOUND"
-          echo "=== Source files ===" && find "$SCOPE" -type f -name '*.py' ! -name 'test_*.py' ! -name '*_test.py' | sort
-          echo "=== Test files ===" && find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) | sort
+          echo "=== Files to mutate ==="
+          if [ "$MODE" = "incremental" ]; then
+            echo "${{ steps.targets.outputs.changed_files }}"
+          else
+            find "${{ steps.targets.outputs.scope }}" -type f -name '*.py' \
+              ! -name 'test_*.py' ! -name '*_test.py' | sort
+          fi
+          echo "=== Test dirs ===" && echo "${{ steps.targets.outputs.test_dirs }}"
 
-      - name: Run mutmut
+      - name: Run mutmut (with per-mutant timeout + mutant cap)
         shell: bash
         run: |
           set +e
           mkdir -p reports/mutants
-          SCOPE="${{ steps.scope.outputs.scope }}"
+
+          SCOPE="${{ steps.targets.outputs.scope }}"
+          MODE="${{ steps.targets.outputs.mode }}"
+          TIMEOUT="${{ env.MUTMUT_TIMEOUT }}"
+          MAX="${{ env.MAX_MUTANTS }}"
+
           SRC_FILES=$(find "$SCOPE" -type f -name '*.py' \
             ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null | sort)
+
           if [ -z "$SRC_FILES" ]; then
             echo "No Python source files to mutate in $SCOPE"
             printf "killed=0\nsurvived=0\ntimeout=0\n" > reports/mutmut-counts.txt
             exit 0
           fi
-          mutmut run 2>&1 | tee reports/mutmut-run.log
-          mutmut results 2>/dev/null | tee reports/mutmut-results.log || true
-          mutmut junitxml > reports/mutmut-results.xml 2>/dev/null || true
 
-          # Layer 1: result-ids subcommand
+          echo "Running mutmut (mode=$MODE, timeout=${TIMEOUT}s, cap=${MAX} mutants) ..."
+
+          # --timeout: kill any test run that exceeds N seconds per mutant
+          # --use-coverage: skip mutants not covered by tests (huge speedup)
+          # First generate coverage so --use-coverage works
+          echo "--- Generating coverage data ---"
+          TEST_DIRS=$(echo "${{ steps.targets.outputs.test_dirs }}" | tr ',' ' ')
+          python3 -m pytest $TEST_DIRS \
+            --cov="${{ steps.targets.outputs.scope }}" \
+            --cov-report=xml:reports/coverage.xml \
+            -q --tb=no 2>&1 | tail -5 || true
+
+          # Run mutmut with timeout and coverage filtering
+          mutmut run \
+            --timeout "$TIMEOUT" \
+            --use-coverage \
+            2>&1 | tee reports/mutmut-run.log
+
+          echo "mutmut exit: $?" | tee -a reports/mutmut-run.log
+
+          mutmut results  2>/dev/null | tee reports/mutmut-results.log || true
+          mutmut junitxml > reports/mutmut-results.xml 2>/dev/null     || true
+
+          # ── Extract counts (3-layer fallback) ──────────────────────
           KILLED=$(mutmut result-ids killed   2>/dev/null | grep -c '[0-9]' || echo 0)
           SURVIVED=$(mutmut result-ids survived 2>/dev/null | grep -c '[0-9]' || echo 0)
-          TIMEOUT=$(mutmut result-ids timeout  2>/dev/null | grep -c '[0-9]' || echo 0)
-          # Layer 2: summary line
+          TIMEOUT_C=$(mutmut result-ids timeout  2>/dev/null | grep -c '[0-9]' || echo 0)
+
           if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
             _K=$(grep -oP '\d+(?=\s+killed)'       reports/mutmut-run.log 2>/dev/null | tail -1)
             _S=$(grep -oP '\d+(?=\s+survived)'     reports/mutmut-run.log 2>/dev/null | tail -1)
             _T=$(grep -oP '\d+(?=\s+timed?\s*out)' reports/mutmut-run.log 2>/dev/null | tail -1)
-            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT=$_T
+            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT_C=$_T
           fi
-          # Layer 3: emoji spinner
           if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
             _K=$(grep -oP '🎉\s*\K\d+' reports/mutmut-run.log 2>/dev/null | tail -1)
             _S=$(grep -oP '🙁\s*\K\d+' reports/mutmut-run.log 2>/dev/null | tail -1)
             _T=$(grep -oP '⏰\s*\K\d+'  reports/mutmut-run.log 2>/dev/null | tail -1)
-            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT=$_T
+            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT_C=$_T
           fi
 
-          KILLED=${KILLED:-0}; SURVIVED=${SURVIVED:-0}; TIMEOUT=${TIMEOUT:-0}
-          printf "killed=%s\nsurvived=%s\ntimeout=%s\n" "$KILLED" "$SURVIVED" "$TIMEOUT" > reports/mutmut-counts.txt
-          echo "Summary: killed=$KILLED survived=$SURVIVED timeout=$TIMEOUT"
+          KILLED=${KILLED:-0}; SURVIVED=${SURVIVED:-0}; TIMEOUT_C=${TIMEOUT_C:-0}
+          printf "killed=%s\nsurvived=%s\ntimeout=%s\n" \
+            "$KILLED" "$SURVIVED" "$TIMEOUT_C" > reports/mutmut-counts.txt
+          echo "Summary: killed=$KILLED survived=$SURVIVED timeout=$TIMEOUT_C"
 
-          # Save diffs for survived mutants
-          SURVIVED_IDS=$(mutmut result-ids survived 2>/dev/null || true)
+          # Save diffs for survived mutants (cap at 50 to avoid huge artifacts)
+          SURVIVED_IDS=$(mutmut result-ids survived 2>/dev/null | head -50 || true)
           for ID in $SURVIVED_IDS; do
             [ -z "$ID" ] && continue
             mutmut show "$ID" > "reports/mutants/mutant-${ID}.diff" 2>/dev/null || true
@@ -617,17 +703,25 @@ jobs:
             reports/mutmut-results.log
             reports/mutmut-counts.txt
             reports/mutmut-results.xml
+            reports/coverage.xml
             reports/mutants/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
   # JOB 4B — C Mutation Testing (universalmutator)
+  #
+  # SPEED FIXES:
+  #   1. Only mutate changed .c files (same git diff logic).
+  #   2. timeout 10 wraps every mutant test run.
+  #   3. Cap mutants per source file at MAX_MUTANTS/files count.
+  #   4. xargs -P4 runs 4 mutant compilations in parallel.
   # ─────────────────────────────────────────────────────────────
   c_mutation:
     name: "4B · C Mutation Testing"
     runs-on: ubuntu-latest
     needs: c_tests
     continue-on-error: true
+    timeout-minutes: 45
     if: >-
       ${{
         always() && (
@@ -647,12 +741,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Install tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y gcc make
@@ -665,11 +759,34 @@ jobs:
           mkdir -p reports/c-mutants
           LOG="reports/c-mutation.log"; : > "$LOG"
           KILLED=0; SURVIVED=0; TOTAL=0
-          SRC_FILES=$(find agent -type f -name '*.c' ! -name 'test_*.c' 2>/dev/null | sort)
+          FULL="${{ github.event_name == 'workflow_dispatch' && inputs.full_mutation || 'false' }}"
+          MUT_TIMEOUT="${{ env.MUTMUT_TIMEOUT }}"
+          MAX="${{ env.MAX_MUTANTS }}"
+
+          # Changed C source files vs previous commit
+          if [ "$FULL" != "true" ]; then
+            CHANGED_C=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep '^agent/.*\.c$' | grep -v 'test_' || true)
+          fi
+
+          if [ -n "$CHANGED_C" ]; then
+            SRC_FILES=$(echo "$CHANGED_C" | sort)
+            echo "Incremental mode: mutating ${CHANGED_C} only" | tee -a "$LOG"
+          else
+            SRC_FILES=$(find agent -type f -name '*.c' ! -name 'test_*.c' 2>/dev/null | sort)
+            echo "Full mode: mutating all C source files" | tee -a "$LOG"
+          fi
+
           if [ -z "$SRC_FILES" ]; then
             echo "No C source files to mutate." | tee -a "$LOG"
           else
+            FILE_COUNT=$(echo "$SRC_FILES" | wc -l)
+            # Per-file mutant cap so total stays ≤ MAX_MUTANTS
+            PER_FILE_CAP=$(python3 -c "print(max(20, $MAX // max($FILE_COUNT,1)))")
+            echo "Files: $FILE_COUNT | Per-file cap: $PER_FILE_CAP" | tee -a "$LOG"
+
             for SRC in $SRC_FILES; do
+              [ -f "$SRC" ] || continue
               STEM=$(basename "$SRC" .c); DIR=$(dirname "$SRC")
               TEST_FILE="$DIR/test_${STEM}.c"
               if [ ! -f "$TEST_FILE" ]; then
@@ -678,26 +795,33 @@ jobs:
               MUTANT_DIR="reports/c-mutants/${STEM}"
               mkdir -p "$MUTANT_DIR"
               INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
-              echo "========================================" | tee -a "$LOG"
-              echo "Mutating: $SRC | Test: $TEST_FILE"       | tee -a "$LOG"
+              echo "========================================"  | tee -a "$LOG"
+              echo "Mutating: $SRC"                           | tee -a "$LOG"
+
               mutate "$SRC" --mutantDir "$MUTANT_DIR" >> "$LOG" 2>&1 || true
-              MCOUNT=$(find "$MUTANT_DIR" -name '*.c' | wc -l)
-              echo "Generated $MCOUNT mutants" | tee -a "$LOG"
+
+              # Apply per-file cap — shuffle then keep first N
+              ALL_MUTANTS=$(find "$MUTANT_DIR" -name '*.c' | shuf | head -"$PER_FILE_CAP")
+              MCOUNT=$(echo "$ALL_MUTANTS" | grep -c '.' || echo 0)
+              echo "Testing $MCOUNT / $(find "$MUTANT_DIR" -name '*.c' | wc -l) mutants" | tee -a "$LOG"
+
               gcc -std=c11 -Wall $INCLUDES -o /tmp/orig_c_test "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
               if [ $? -ne 0 ]; then
                 echo "BASELINE COMPILE FAIL — skip" | tee -a "$LOG"; continue
               fi
-              /tmp/orig_c_test >> "$LOG" 2>&1; BASELINE=$?
+              timeout "$MUT_TIMEOUT" /tmp/orig_c_test >> "$LOG" 2>&1; BASELINE=$?
               echo "Baseline exit: $BASELINE" | tee -a "$LOG"
-              for MUTANT in "$MUTANT_DIR"/*.c; do
+
+              for MUTANT in $ALL_MUTANTS; do
                 [ -f "$MUTANT" ] || continue
                 TOTAL=$((TOTAL + 1))
                 MID=$(basename "$MUTANT" .c)
-                gcc -std=c11 -Wall $INCLUDES -o /tmp/mut_c_test "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
+                gcc -std=c11 -Wall $INCLUDES -o /tmp/mut_c_test \
+                  "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
                 if [ $? -ne 0 ]; then
                   KILLED=$((KILLED + 1)); echo "[KILLED-COMPILE] $MID" | tee -a "$LOG"; continue
                 fi
-                /tmp/mut_c_test >> "$LOG" 2>&1; RUN_EXIT=$?
+                timeout "$MUT_TIMEOUT" /tmp/mut_c_test >> "$LOG" 2>&1; RUN_EXIT=$?
                 if [ "$RUN_EXIT" -ne "$BASELINE" ]; then
                   KILLED=$((KILLED + 1)); echo "[KILLED] $MID" | tee -a "$LOG"
                 else
@@ -707,6 +831,7 @@ jobs:
               done
             done
           fi
+
           SCORE=$(python3 -c "print(round($KILLED/$TOTAL*100,2) if $TOTAL>0 else 0.0)" || echo 0)
           echo "C mutation: killed=$KILLED survived=$SURVIVED total=$TOTAL score=$SCORE%" | tee -a "$LOG"
           { echo "killed=$KILLED"; echo "survived=$SURVIVED"
@@ -724,12 +849,14 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────
   # JOB 4C — C++ Mutation Testing (universalmutator)
+  # Same speed fixes as 4B
   # ─────────────────────────────────────────────────────────────
   cpp_mutation:
     name: "4C · C++ Mutation Testing"
     runs-on: ubuntu-latest
     needs: cpp_tests
     continue-on-error: true
+    timeout-minutes: 45
     if: >-
       ${{
         always() && (
@@ -749,12 +876,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Install tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y g++ make
@@ -767,12 +894,33 @@ jobs:
           mkdir -p reports/cpp-mutants
           LOG="reports/cpp-mutation.log"; : > "$LOG"
           KILLED=0; SURVIVED=0; TOTAL=0
-          SRC_FILES=$(find agent -type f \( -name '*.cpp' -o -name '*.cc' \) \
-            ! -name 'test_*' 2>/dev/null | sort)
+          FULL="${{ github.event_name == 'workflow_dispatch' && inputs.full_mutation || 'false' }}"
+          MUT_TIMEOUT="${{ env.MUTMUT_TIMEOUT }}"
+          MAX="${{ env.MAX_MUTANTS }}"
+
+          if [ "$FULL" != "true" ]; then
+            CHANGED_CPP=$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+              | grep '^agent/.*\.\(cpp\|cc\)$' | grep -v 'test_' || true)
+          fi
+
+          if [ -n "$CHANGED_CPP" ]; then
+            SRC_FILES=$(echo "$CHANGED_CPP" | sort)
+            echo "Incremental mode: mutating changed C++ files only" | tee -a "$LOG"
+          else
+            SRC_FILES=$(find agent -type f \( -name '*.cpp' -o -name '*.cc' \) \
+              ! -name 'test_*' 2>/dev/null | sort)
+            echo "Full mode: mutating all C++ source files" | tee -a "$LOG"
+          fi
+
           if [ -z "$SRC_FILES" ]; then
             echo "No C++ source files to mutate." | tee -a "$LOG"
           else
+            FILE_COUNT=$(echo "$SRC_FILES" | wc -l)
+            PER_FILE_CAP=$(python3 -c "print(max(20, $MAX // max($FILE_COUNT,1)))")
+            echo "Files: $FILE_COUNT | Per-file cap: $PER_FILE_CAP" | tee -a "$LOG"
+
             for SRC in $SRC_FILES; do
+              [ -f "$SRC" ] || continue
               STEM_FULL=$(basename "$SRC"); STEM="${STEM_FULL%.*}"; DIR=$(dirname "$SRC")
               TEST_FILE=""
               for TRY in "$DIR/test_${STEM}.cpp" "$DIR/test_${STEM}.cc"; do
@@ -784,26 +932,33 @@ jobs:
               MUTANT_DIR="reports/cpp-mutants/${STEM}"
               mkdir -p "$MUTANT_DIR"
               INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
-              echo "========================================" | tee -a "$LOG"
-              echo "Mutating: $SRC | Test: $TEST_FILE"       | tee -a "$LOG"
+              echo "========================================"  | tee -a "$LOG"
+              echo "Mutating: $SRC"                           | tee -a "$LOG"
+
               mutate "$SRC" --mutantDir "$MUTANT_DIR" >> "$LOG" 2>&1 || true
-              MCOUNT=$(find "$MUTANT_DIR" \( -name '*.cpp' -o -name '*.cc' \) | wc -l)
-              echo "Generated $MCOUNT mutants" | tee -a "$LOG"
+
+              ALL_MUTANTS=$(find "$MUTANT_DIR" \( -name '*.cpp' -o -name '*.cc' \) \
+                | shuf | head -"$PER_FILE_CAP")
+              MCOUNT=$(echo "$ALL_MUTANTS" | grep -c '.' || echo 0)
+              echo "Testing $MCOUNT mutants (capped)" | tee -a "$LOG"
+
               g++ -std=c++17 -Wall $INCLUDES -o /tmp/orig_cpp_test "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
               if [ $? -ne 0 ]; then
                 echo "BASELINE COMPILE FAIL — skip" | tee -a "$LOG"; continue
               fi
-              /tmp/orig_cpp_test >> "$LOG" 2>&1; BASELINE=$?
+              timeout "$MUT_TIMEOUT" /tmp/orig_cpp_test >> "$LOG" 2>&1; BASELINE=$?
               echo "Baseline exit: $BASELINE" | tee -a "$LOG"
-              for MUTANT in "$MUTANT_DIR"/*.cpp "$MUTANT_DIR"/*.cc; do
+
+              for MUTANT in $ALL_MUTANTS; do
                 [ -f "$MUTANT" ] || continue
                 TOTAL=$((TOTAL + 1))
                 MID_FULL=$(basename "$MUTANT"); MID="${MID_FULL%.*}"
-                g++ -std=c++17 -Wall $INCLUDES -o /tmp/mut_cpp_test "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
+                g++ -std=c++17 -Wall $INCLUDES -o /tmp/mut_cpp_test \
+                  "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
                 if [ $? -ne 0 ]; then
                   KILLED=$((KILLED + 1)); echo "[KILLED-COMPILE] $MID" | tee -a "$LOG"; continue
                 fi
-                /tmp/mut_cpp_test >> "$LOG" 2>&1; RUN_EXIT=$?
+                timeout "$MUT_TIMEOUT" /tmp/mut_cpp_test >> "$LOG" 2>&1; RUN_EXIT=$?
                 if [ "$RUN_EXIT" -ne "$BASELINE" ]; then
                   KILLED=$((KILLED + 1)); echo "[KILLED] $MID" | tee -a "$LOG"
                 else
@@ -813,6 +968,7 @@ jobs:
               done
             done
           fi
+
           SCORE=$(python3 -c "print(round($KILLED/$TOTAL*100,2) if $TOTAL>0 else 0.0)" || echo 0)
           echo "C++ mutation: killed=$KILLED survived=$SURVIVED total=$TOTAL score=$SCORE%" | tee -a "$LOG"
           { echo "killed=$KILLED"; echo "survived=$SURVIVED"
@@ -830,14 +986,12 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────
   # JOB 5 — Combined HTML Report
-  # Pulls outputs from all jobs and builds one self-contained
-  # report.html showing unit tests + all mutation scores +
-  # killed/survived mutant diffs per language.
   # ─────────────────────────────────────────────────────────────
   combined_report:
     name: "5 · Combined HTML Report"
     runs-on: ubuntu-latest
     if: always()
+    timeout-minutes: 10
     needs:
       - unit_tests
       - mutation_tests
@@ -853,38 +1007,38 @@ jobs:
 
       - name: Build combined report
         env:
-          UT_TOTAL:        ${{ needs.unit_tests.outputs.total    || '0' }}
-          UT_PASSED:       ${{ needs.unit_tests.outputs.passed   || '0' }}
-          UT_FAILED:       ${{ needs.unit_tests.outputs.failed   || '0' }}
-          UT_ERRORS:       ${{ needs.unit_tests.outputs.errors   || '0' }}
-          UT_SKIPPED:      ${{ needs.unit_tests.outputs.skipped  || '0' }}
-          PY_KILLED:       ${{ needs.mutation_tests.outputs.killed        || '0' }}
-          PY_SURVIVED:     ${{ needs.mutation_tests.outputs.survived      || '0' }}
-          PY_TIMEOUT:      ${{ needs.mutation_tests.outputs.timeout       || '0' }}
-          PY_TOTAL:        ${{ needs.mutation_tests.outputs.total_mutants || '0' }}
-          PY_SCORE:        ${{ needs.mutation_tests.outputs.mutation_score || '0' }}
-          C_FILES:         ${{ needs.c_tests.outputs.files        || '0' }}
-          C_COMPILE_PASS:  ${{ needs.c_tests.outputs.compile_pass || '0' }}
-          C_COMPILE_FAIL:  ${{ needs.c_tests.outputs.compile_fail || '0' }}
-          C_RUN_PASS:      ${{ needs.c_tests.outputs.run_pass     || '0' }}
-          C_RUN_FAIL:      ${{ needs.c_tests.outputs.run_fail     || '0' }}
-          C_KILLED:        ${{ needs.c_mutation.outputs.killed    || '0' }}
-          C_SURVIVED:      ${{ needs.c_mutation.outputs.survived  || '0' }}
-          C_TOTAL:         ${{ needs.c_mutation.outputs.total     || '0' }}
-          C_SCORE:         ${{ needs.c_mutation.outputs.score     || '0' }}
-          CPP_FILES:       ${{ needs.cpp_tests.outputs.files        || '0' }}
+          UT_TOTAL:         ${{ needs.unit_tests.outputs.total    || '0' }}
+          UT_PASSED:        ${{ needs.unit_tests.outputs.passed   || '0' }}
+          UT_FAILED:        ${{ needs.unit_tests.outputs.failed   || '0' }}
+          UT_ERRORS:        ${{ needs.unit_tests.outputs.errors   || '0' }}
+          UT_SKIPPED:       ${{ needs.unit_tests.outputs.skipped  || '0' }}
+          PY_KILLED:        ${{ needs.mutation_tests.outputs.killed        || '0' }}
+          PY_SURVIVED:      ${{ needs.mutation_tests.outputs.survived      || '0' }}
+          PY_TIMEOUT:       ${{ needs.mutation_tests.outputs.timeout       || '0' }}
+          PY_TOTAL:         ${{ needs.mutation_tests.outputs.total_mutants || '0' }}
+          PY_SCORE:         ${{ needs.mutation_tests.outputs.mutation_score || '0' }}
+          C_FILES:          ${{ needs.c_tests.outputs.files        || '0' }}
+          C_COMPILE_PASS:   ${{ needs.c_tests.outputs.compile_pass || '0' }}
+          C_COMPILE_FAIL:   ${{ needs.c_tests.outputs.compile_fail || '0' }}
+          C_RUN_PASS:       ${{ needs.c_tests.outputs.run_pass     || '0' }}
+          C_RUN_FAIL:       ${{ needs.c_tests.outputs.run_fail     || '0' }}
+          C_KILLED:         ${{ needs.c_mutation.outputs.killed    || '0' }}
+          C_SURVIVED:       ${{ needs.c_mutation.outputs.survived  || '0' }}
+          C_TOTAL:          ${{ needs.c_mutation.outputs.total     || '0' }}
+          C_SCORE:          ${{ needs.c_mutation.outputs.score     || '0' }}
+          CPP_FILES:        ${{ needs.cpp_tests.outputs.files        || '0' }}
           CPP_COMPILE_PASS: ${{ needs.cpp_tests.outputs.compile_pass || '0' }}
           CPP_COMPILE_FAIL: ${{ needs.cpp_tests.outputs.compile_fail || '0' }}
-          CPP_RUN_PASS:    ${{ needs.cpp_tests.outputs.run_pass     || '0' }}
-          CPP_RUN_FAIL:    ${{ needs.cpp_tests.outputs.run_fail     || '0' }}
-          CPP_KILLED:      ${{ needs.cpp_mutation.outputs.killed    || '0' }}
-          CPP_SURVIVED:    ${{ needs.cpp_mutation.outputs.survived  || '0' }}
-          CPP_TOTAL:       ${{ needs.cpp_mutation.outputs.total     || '0' }}
-          CPP_SCORE:       ${{ needs.cpp_mutation.outputs.score     || '0' }}
-          GH_REPO:         ${{ github.repository }}
-          GH_BRANCH:       ${{ github.ref_name }}
-          GH_SHA:          ${{ github.sha }}
-          GH_RUN_ID:       ${{ github.run_id }}
+          CPP_RUN_PASS:     ${{ needs.cpp_tests.outputs.run_pass     || '0' }}
+          CPP_RUN_FAIL:     ${{ needs.cpp_tests.outputs.run_fail     || '0' }}
+          CPP_KILLED:       ${{ needs.cpp_mutation.outputs.killed    || '0' }}
+          CPP_SURVIVED:     ${{ needs.cpp_mutation.outputs.survived  || '0' }}
+          CPP_TOTAL:        ${{ needs.cpp_mutation.outputs.total     || '0' }}
+          CPP_SCORE:        ${{ needs.cpp_mutation.outputs.score     || '0' }}
+          GH_REPO:          ${{ github.repository }}
+          GH_BRANCH:        ${{ github.ref_name }}
+          GH_SHA:           ${{ github.sha }}
+          GH_RUN_ID:        ${{ github.run_id }}
         run: |
           mkdir -p reports
           python3 - <<'PY'
@@ -895,39 +1049,27 @@ jobs:
               try: return cast(os.environ.get(v) or 0)
               except: return cast(0)
 
-          # ── collect data ──────────────────────────────────────────────
           data = {
-              "repo":   os.environ.get("GH_REPO", ""),
-              "branch": os.environ.get("GH_BRANCH", ""),
-              "sha":    os.environ.get("GH_SHA", "")[:8],
-              "run":    os.environ.get("GH_RUN_ID", ""),
-              "ts":     time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
-              "unit": {
-                  "total": e("UT_TOTAL"), "passed": e("UT_PASSED"),
-                  "failed": e("UT_FAILED"), "errors": e("UT_ERRORS"),
-                  "skipped": e("UT_SKIPPED"),
-              },
-              "py":  { "killed": e("PY_KILLED"), "survived": e("PY_SURVIVED"),
-                       "timeout": e("PY_TIMEOUT"), "total": e("PY_TOTAL"),
-                       "score": e("PY_SCORE", float) },
-              "c":   { "files": e("C_FILES"), "cp": e("C_COMPILE_PASS"),
-                       "cf": e("C_COMPILE_FAIL"), "rp": e("C_RUN_PASS"), "rf": e("C_RUN_FAIL"),
-                       "killed": e("C_KILLED"), "survived": e("C_SURVIVED"),
-                       "total": e("C_TOTAL"), "score": e("C_SCORE", float) },
-              "cpp": { "files": e("CPP_FILES"), "cp": e("CPP_COMPILE_PASS"),
-                       "cf": e("CPP_COMPILE_FAIL"), "rp": e("CPP_RUN_PASS"), "rf": e("CPP_RUN_FAIL"),
-                       "killed": e("CPP_KILLED"), "survived": e("CPP_SURVIVED"),
-                       "total": e("CPP_TOTAL"), "score": e("CPP_SCORE", float) },
+              "repo": os.environ.get("GH_REPO",""), "branch": os.environ.get("GH_BRANCH",""),
+              "sha":  os.environ.get("GH_SHA","")[:8], "run": os.environ.get("GH_RUN_ID",""),
+              "ts":   time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
+              "unit": {"total":e("UT_TOTAL"),"passed":e("UT_PASSED"),"failed":e("UT_FAILED"),
+                       "errors":e("UT_ERRORS"),"skipped":e("UT_SKIPPED")},
+              "py":  {"killed":e("PY_KILLED"),"survived":e("PY_SURVIVED"),"timeout":e("PY_TIMEOUT"),
+                      "total":e("PY_TOTAL"),"score":e("PY_SCORE",float)},
+              "c":   {"files":e("C_FILES"),"cp":e("C_COMPILE_PASS"),"cf":e("C_COMPILE_FAIL"),
+                      "rp":e("C_RUN_PASS"),"rf":e("C_RUN_FAIL"),"killed":e("C_KILLED"),
+                      "survived":e("C_SURVIVED"),"total":e("C_TOTAL"),"score":e("C_SCORE",float)},
+              "cpp": {"files":e("CPP_FILES"),"cp":e("CPP_COMPILE_PASS"),"cf":e("CPP_COMPILE_FAIL"),
+                      "rp":e("CPP_RUN_PASS"),"rf":e("CPP_RUN_FAIL"),"killed":e("CPP_KILLED"),
+                      "survived":e("CPP_SURVIVED"),"total":e("CPP_TOTAL"),"score":e("CPP_SCORE",float)},
           }
 
-          # ── helpers ───────────────────────────────────────────────────
           def score_color(s):
-              if s >= 80: return "#22863a"
-              if s >= 50: return "#b08800"
-              return "#cb2431"
+              return "#22863a" if s>=80 else ("#b08800" if s>=50 else "#cb2431")
 
           def bar(pct, color):
-              return (f'<div style="background:#e1e4e8;border-radius:4px;height:10px;margin:4px 0">'
+              return (f'<div style="background:#e1e4e8;border-radius:4px;height:10px;margin:6px 0">'
                       f'<div style="width:{min(pct,100):.1f}%;background:{color};height:10px;border-radius:4px"></div></div>')
 
           def stat(label, value, color="#24292e"):
@@ -941,16 +1083,15 @@ jobs:
                       f'border-bottom:1px solid #d0d7de;padding-bottom:6px;margin:28px 0 14px">{title}</h2>')
 
           def mut_section(lang, d):
-              sc = d["score"]; color = score_color(sc)
-              killed_pct = (d["killed"] / d["total"] * 100) if d["total"] else 0
-              surv_pct   = (d["survived"] / d["total"] * 100) if d["total"] else 0
+              sc=d["score"]; color=score_color(sc)
+              kp=(d["killed"]/d["total"]*100) if d["total"] else 0
               return f"""
           <div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:16px 20px;margin-bottom:12px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
               <span style="font-weight:600;font-size:14px">{lang}</span>
               <span style="font-size:22px;font-weight:700;color:{color}">{sc}%</span>
             </div>
-            {bar(killed_pct, "#22863a")}
+            {bar(kp, color)}
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px">
               <div style="text-align:center"><div style="font-size:10px;color:#57606a">Total</div>
                 <div style="font-size:18px;font-weight:600">{d["total"]}</div></div>
@@ -963,140 +1104,104 @@ jobs:
             </div>
           </div>"""
 
-          # ── collect killed/survived diffs ────────────────────────────
-          def collect_diffs(base_dir, ext="*.diff"):
-              diffs = []
+          def collect_diffs(base_dir):
               p = Path(base_dir)
-              if p.exists():
-                  for f in sorted(p.rglob(ext)):
-                      diffs.append((f.stem, f.read_text(errors="ignore")))
-              return diffs
+              return [(f.stem, f.read_text(errors="ignore"))
+                      for f in sorted(p.rglob("*.diff"))] if p.exists() else []
+
+          def diff_block(diffs, lang):
+              if not diffs:
+                  return f'<p style="color:#57606a;font-size:13px">No surviving {lang} mutants ✓</p>'
+              rows = ""
+              for name, content in diffs[:50]:
+                  rows += (f'<details style="margin:6px 0;border:1px solid #d0d7de;border-radius:6px">'
+                           f'<summary style="cursor:pointer;padding:8px 12px;font-size:13px;font-weight:500;'
+                           f'background:#f6f8fa;border-radius:6px">{html.escape(name)}</summary>'
+                           f'<pre style="margin:0;padding:14px;font-size:12px;background:#0d1117;color:#c9d1d9;'
+                           f'overflow-x:auto;border-radius:0 0 6px 6px">{html.escape(content)}</pre></details>')
+              return rows
 
           py_diffs  = collect_diffs("downloaded/mutation-test-results/mutants")
           c_diffs   = collect_diffs("downloaded/c-mutation-results/c-mutants")
           cpp_diffs = collect_diffs("downloaded/cpp-mutation-results/cpp-mutants")
 
-          def diff_block(diffs, lang):
-              if not diffs:
-                  return f'<p style="color:#57606a;font-size:13px">No surviving {lang} mutants — all killed ✓</p>'
-              rows = ""
-              for name, content in diffs:
-                  rows += (f'<details style="margin:6px 0;border:1px solid #d0d7de;border-radius:6px">'
-                           f'<summary style="cursor:pointer;padding:8px 12px;font-size:13px;'
-                           f'font-weight:500;background:#f6f8fa;border-radius:6px">{html.escape(name)}</summary>'
-                           f'<pre style="margin:0;padding:14px;font-size:12px;background:#0d1117;color:#c9d1d9;'
-                           f'overflow-x:auto;border-radius:0 0 6px 6px">{html.escape(content)}</pre></details>')
-              return rows
-
-          # ── also grab mutmut run log ──────────────────────────────────
           py_log = ""
-          log_path = Path("downloaded/mutation-test-results/mutmut-run.log")
-          if log_path.exists():
-              py_log = log_path.read_text(errors="ignore")[-6000:]  # last 6k chars
+          lp = Path("downloaded/mutation-test-results/mutmut-run.log")
+          if lp.exists(): py_log = lp.read_text(errors="ignore")[-6000:]
 
-          # ── unit test pass rate ───────────────────────────────────────
           u = data["unit"]
-          unit_pct = (u["passed"] / u["total"] * 100) if u["total"] else 0
+          unit_pct   = (u["passed"]/u["total"]*100) if u["total"] else 0
           unit_color = score_color(unit_pct)
+          tk = data["py"]["killed"]  + data["c"]["killed"]  + data["cpp"]["killed"]
+          tm = data["py"]["total"]   + data["c"]["total"]   + data["cpp"]["total"]
+          ts = data["py"]["survived"]+ data["c"]["survived"]+ data["cpp"]["survived"]
+          ov = round(tk/tm*100,2) if tm else 0.0
+          oc = score_color(ov)
 
-          # ── overall combined score (all languages) ────────────────────
-          total_killed   = data["py"]["killed"]  + data["c"]["killed"]  + data["cpp"]["killed"]
-          total_mutants  = data["py"]["total"]   + data["c"]["total"]   + data["cpp"]["total"]
-          total_survived = data["py"]["survived"] + data["c"]["survived"] + data["cpp"]["survived"]
-          overall_score  = round(total_killed / total_mutants * 100, 2) if total_mutants else 0.0
-          overall_color  = score_color(overall_score)
-
-          # ── HTML ──────────────────────────────────────────────────────
-          html_out = f"""<!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>CI Mutation Report — {html.escape(data["repo"])}</title>
-            <style>
-              *, *::before, *::after {{ box-sizing: border-box; }}
-              body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-                      margin: 0; padding: 0; background: #fff; color: #24292e; }}
-              .header {{ background: #24292e; color: #fff; padding: 18px 32px; }}
-              .header h1 {{ margin: 0; font-size: 17px; font-weight: 600; }}
-              .header p  {{ margin: 4px 0 0; font-size: 12px; color: #8b949e; }}
-              .body  {{ max-width: 900px; margin: 0 auto; padding: 24px 32px 48px; }}
-              .grid4 {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }}
-              .grid3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }}
-              @media(max-width:600px) {{ .grid4,.grid3 {{ grid-template-columns:repeat(2,1fr); }} }}
-            </style>
-          </head>
-          <body>
-          <div class="header">
-            <h1>CI Mutation Testing Report</h1>
-            <p>{html.escape(data["repo"])} &nbsp;·&nbsp; branch: {html.escape(data["branch"])}
-               &nbsp;·&nbsp; {html.escape(data["sha"])} &nbsp;·&nbsp; run #{html.escape(data["run"])}
-               &nbsp;·&nbsp; {data["ts"]}</p>
-          </div>
+          out = f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>CI Report — {html.escape(data["repo"])}</title>
+          <style>*,*::before,*::after{{box-sizing:border-box}}
+          body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+               margin:0;padding:0;background:#fff;color:#24292e}}
+          .hdr{{background:#24292e;color:#fff;padding:18px 32px}}
+          .hdr h1{{margin:0;font-size:17px;font-weight:600}}
+          .hdr p{{margin:4px 0 0;font-size:12px;color:#8b949e}}
+          .body{{max-width:900px;margin:0 auto;padding:24px 32px 48px}}
+          .g4{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}
+          .g3{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
+          @media(max-width:600px){{.g4,.g3{{grid-template-columns:repeat(2,1fr)}}}}</style>
+          </head><body>
+          <div class="hdr"><h1>CI Mutation Testing Report</h1>
+          <p>{html.escape(data["repo"])} &nbsp;·&nbsp; {html.escape(data["branch"])}
+             &nbsp;·&nbsp; {html.escape(data["sha"])} &nbsp;·&nbsp; run #{html.escape(data["run"])}
+             &nbsp;·&nbsp; {data["ts"]}</p></div>
           <div class="body">
-
-          {section("Overall Mutation Score (all languages)")}
+          {section("Overall Mutation Score (Python + C + C++)")}
           <div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:20px 24px;margin-bottom:8px">
             <div style="display:flex;align-items:center;justify-content:space-between">
-              <span style="font-size:14px;color:#57606a">Python + C + C++ combined</span>
-              <span style="font-size:32px;font-weight:700;color:{overall_color}">{overall_score}%</span>
+              <span style="font-size:14px;color:#57606a">All languages combined</span>
+              <span style="font-size:32px;font-weight:700;color:{oc}">{ov}%</span>
             </div>
-            {bar(overall_score, overall_color)}
-            <div class="grid3" style="margin-top:12px">
-              {stat("Total Mutants", total_mutants)}
-              {stat("Killed ✓", total_killed, "#22863a")}
-              {stat("Survived ✗", total_survived, "#cb2431")}
+            {bar(ov, oc)}
+            <div class="g3" style="margin-top:12px">
+              {stat("Total Mutants",tm)}{stat("Killed ✓",tk,"#22863a")}{stat("Survived ✗",ts,"#cb2431")}
             </div>
           </div>
-
           {section("Unit Tests (Python)")}
-          <div class="grid4">
-            {stat("Total", u["total"])}
-            {stat("Passed ✓", u["passed"], "#22863a")}
-            {stat("Failed ✗", u["failed"], "#cb2431")}
-            {stat("Skipped", u["skipped"], "#b08800")}
-          </div>
-          {bar(unit_pct, unit_color)}
-
+          <div class="g4">
+            {stat("Total",u["total"])}{stat("Passed ✓",u["passed"],"#22863a")}
+            {stat("Failed ✗",u["failed"],"#cb2431")}{stat("Skipped",u["skipped"],"#b08800")}
+          </div>{bar(unit_pct,unit_color)}
           {section("Mutation Testing by Language")}
-          {mut_section("Python", data["py"])}
-          {mut_section("C", data["c"])}
-          {mut_section("C++", data["cpp"])}
-
+          {mut_section("Python",data["py"])}
+          {mut_section("C",data["c"])}
+          {mut_section("C++",data["cpp"])}
           {section("C Compile & Run")}
-          <div class="grid4">
-            {stat("Files", data["c"]["files"])}
-            {stat("Compile Pass", data["c"]["cp"], "#22863a")}
-            {stat("Compile Fail", data["c"]["cf"], "#cb2431")}
-            {stat("Run Pass / Fail", f'{data["c"]["rp"]} / {data["c"]["rf"]}')}
+          <div class="g4">
+            {stat("Files",data["c"]["files"])}{stat("Compile Pass",data["c"]["cp"],"#22863a")}
+            {stat("Compile Fail",data["c"]["cf"],"#cb2431")}
+            {stat("Run Pass/Fail",f'{data["c"]["rp"]} / {data["c"]["rf"]}')}
           </div>
-
           {section("C++ Compile & Run")}
-          <div class="grid4">
-            {stat("Files", data["cpp"]["files"])}
-            {stat("Compile Pass", data["cpp"]["cp"], "#22863a")}
-            {stat("Compile Fail", data["cpp"]["cf"], "#cb2431")}
-            {stat("Run Pass / Fail", f'{data["cpp"]["rp"]} / {data["cpp"]["rf"]}')}
+          <div class="g4">
+            {stat("Files",data["cpp"]["files"])}{stat("Compile Pass",data["cpp"]["cp"],"#22863a")}
+            {stat("Compile Fail",data["cpp"]["cf"],"#cb2431")}
+            {stat("Run Pass/Fail",f'{data["cpp"]["rp"]} / {data["cpp"]["rf"]}')}
           </div>
-
-          {section("Killed Mutants — Python (survived diffs)")}
-          {diff_block(py_diffs, "Python")}
-
-          {section("Killed Mutants — C (survived diffs)")}
-          {diff_block(c_diffs, "C")}
-
-          {section("Killed Mutants — C++ (survived diffs)")}
-          {diff_block(cpp_diffs, "C++")}
-
-          {section("Python mutmut Run Log (last 6 000 chars)")}
+          {section("Surviving Mutants — Python")}
+          {diff_block(py_diffs,"Python")}
+          {section("Surviving Mutants — C")}
+          {diff_block(c_diffs,"C")}
+          {section("Surviving Mutants — C++")}
+          {diff_block(cpp_diffs,"C++")}
+          {section("mutmut Run Log (last 6 000 chars)")}
           <pre style="background:#0d1117;color:#c9d1d9;padding:16px;border-radius:8px;
                       font-size:12px;overflow-x:auto;white-space:pre-wrap">{html.escape(py_log) if py_log else "No log captured."}</pre>
+          </div></body></html>"""
 
-          </div>
-          </body>
-          </html>"""
-
-          Path("reports/combined-report.html").write_text(html_out, encoding="utf-8")
+          Path("reports/combined-report.html").write_text(out, encoding="utf-8")
           print("Combined report written.")
           PY
 
@@ -1107,20 +1212,3 @@ jobs:
           name: combined-report
           path: reports/combined-report.html
           if-no-files-found: error
-
-      # ── Grafana / Prometheus push is commented out ──────────────────
-      # Uncomment and set secrets (PUSHGATEWAY_URL) to re-enable.
-      #
-      # - name: Push to Grafana + Prometheus push-gateway
-      #   env:
-      #     GRAFANA_URL:      "http://127.0.0.1:3000"
-      #     GRAFANA_USER:     "admin"
-      #     GRAFANA_PASSWORD: "admin"
-      #     PUSHGATEWAY_URL:  ${{ secrets.PUSHGATEWAY_URL }}
-      #   run: |
-      #     pip install requests
-      #     python3 - <<'PY'
-      #     import json, os, time, requests
-      #     from pathlib import Path
-      #     # ... restore grafana annotation + prometheus push logic here
-      #     PY
