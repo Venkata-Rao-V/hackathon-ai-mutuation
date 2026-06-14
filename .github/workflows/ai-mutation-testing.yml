@@ -454,7 +454,7 @@ jobs:
       #
       # We do NOT set "runner" — providing a custom runner caused pytest exit code 5
       # ("no tests collected") on every mutant because the path was unresolvable.
-      # mutmut builds its own correct pytest command from tests_dirs instead.
+      # mutmut builds its own correct pytest command from tests_dir.
       #
       # Heredoc MUST start at column 0. Leading spaces make INI keys unrecognised.
       - name: Determine scope and write setup.cfg [mutmut]
@@ -479,8 +479,8 @@ jobs:
           [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
           [ -z "$TEST_DIRS"  ] && TEST_DIRS="$SCOPE"
 
-          echo "source_paths : $SRC_PATHS"
-          echo "tests_dirs   : $TEST_DIRS"
+          echo "paths_to_mutate : $SRC_PATHS"
+          echo "tests_dir   : $TEST_DIRS"
 
           # Strip any existing [mutmut] block
           if [ -f setup.cfg ]; then
@@ -495,7 +495,8 @@ jobs:
           cat >> setup.cfg << CFG
 
           [mutmut]
-          source_paths = ${SRC_PATHS}
+          paths_to_mutate = ${SRC_PATHS}
+          tests_dir = ${TEST_DIRS}
           tests_dirs = ${TEST_DIRS}
           CFG
 
@@ -539,9 +540,14 @@ jobs:
           mutmut junitxml > reports/mutmut-results.xml 2>/dev/null || true
 
           # Layer 1: result-ids subcommand
-          KILLED=$(mutmut result-ids killed   2>/dev/null | grep -c '[0-9]' || echo 0)
-          SURVIVED=$(mutmut result-ids survived 2>/dev/null | grep -c '[0-9]' || echo 0)
-          TIMEOUT=$(mutmut result-ids timeout  2>/dev/null | grep -c '[0-9]' || echo 0)
+          count_result_ids () {
+            local status="$1"
+            mutmut result-ids "$status" 2>/dev/null \
+              | awk '/^[0-9]+$/ { c++ } END { print c+0 }'
+          }
+          KILLED=$(count_result_ids killed)
+          SURVIVED=$(count_result_ids survived)
+          TIMEOUT=$(count_result_ids timeout)
           # Layer 2: summary line
           if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
             _K=$(grep -oP '\d+(?=\s+killed)'       reports/mutmut-run.log 2>/dev/null | tail -1)
