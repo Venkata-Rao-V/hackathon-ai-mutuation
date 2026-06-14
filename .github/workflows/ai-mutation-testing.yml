@@ -449,9 +449,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # Write setup.cfg BEFORE pip installs mutmut — mutmut reads it at import time.
-      # IMPORTANT: the heredoc must NOT be indented — leading spaces make the keys
-      # appear as continuation lines and mutmut ignores them entirely.
+      # Write setup.cfg BEFORE pip installs mutmut.
+      # mutmut reads setup.cfg at import time — must exist before first binary call.
+      #
+      # We do NOT set "runner" — providing a custom runner caused pytest exit code 5
+      # ("no tests collected") on every mutant because the path was unresolvable.
+      # mutmut builds its own correct pytest command from tests_dirs instead.
+      #
+      # Heredoc MUST start at column 0. Leading spaces make INI keys unrecognised.
       - name: Determine scope and write setup.cfg [mutmut]
         id: scope
         shell: bash
@@ -460,36 +465,24 @@ jobs:
           echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
           echo "Mutation scope: $SCOPE"
 
-          # Comma-separated list of dirs containing non-test source .py files
+          # Comma-separated dirs containing non-test source .py files
           SRC_PATHS=$(find "$SCOPE" -type f -name '*.py' \
             ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null \
             | xargs -I{} dirname {} 2>/dev/null | sort -u \
             | tr '\n' ',' | sed 's/,$//')
 
-          # Comma-separated list of dirs containing test files
+          # Comma-separated dirs containing test files
           TEST_DIRS=$(find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
             2>/dev/null | xargs -I{} dirname {} 2>/dev/null | sort -u \
             | tr '\n' ',' | sed 's/,$//')
 
-          # Space-separated list of individual test files for the runner command
-          TEST_FILES=$(find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
-            2>/dev/null | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-
           [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
           [ -z "$TEST_DIRS"  ] && TEST_DIRS="$SCOPE"
 
-          # Build runner — NOTE the space between TEST_FILES and -x (was the bug)
-          if [ -n "$TEST_FILES" ]; then
-            RUNNER="python -m pytest ${TEST_FILES} -x -q --tb=short"
-          else
-            RUNNER="python -m pytest ${SCOPE} -x -q --tb=short"
-          fi
-
           echo "source_paths : $SRC_PATHS"
           echo "tests_dirs   : $TEST_DIRS"
-          echo "runner       : $RUNNER"
 
-          # Remove any existing [mutmut] block from setup.cfg
+          # Strip any existing [mutmut] block
           if [ -f setup.cfg ]; then
             python3 -c "
           import re, pathlib
@@ -498,32 +491,31 @@ jobs:
           pathlib.Path('setup.cfg').write_text(text.rstrip() + '\n')"
           fi
 
-          # Write [mutmut] section — heredoc at column 0, NO leading spaces on keys.
-          # Leading spaces would make mutmut treat them as continuation of previous key.
+          # Keys must be flush-left — do NOT indent this heredoc
           cat >> setup.cfg << CFG
 
           [mutmut]
           source_paths = ${SRC_PATHS}
           tests_dirs = ${TEST_DIRS}
-          runner = ${RUNNER}
           CFG
 
-                    echo "=== setup.cfg [mutmut] ==="
-                    grep -A6 '^\[mutmut\]' setup.cfg || true
+          echo "=== setup.cfg [mutmut] ==="
+          grep -A5 '^\[mutmut\]' setup.cfg || true
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install "mutmut>=2,<4" pytest pytest-cov
+          pip install "mutmut==2.4.4" pytest pytest-cov
 
       - name: Clear mutmut cache
         run: rm -f .mutmut-cache
 
       - name: Debug — confirm files mutmut will see
+        continue-on-error: true
         shell: bash
         run: |
           SCOPE="${{ steps.scope.outputs.scope }}"
-          echo "=== mutmut version ===" && mutmut --version
+          echo "=== mutmut version ===" && pip show mutmut | grep -E "^(Name|Version)"
           echo "=== setup.cfg [mutmut] ==="
           grep -A10 '^\[mutmut\]' setup.cfg || echo "NOT FOUND"
           echo "=== Source files ===" && find "$SCOPE" -type f -name '*.py' ! -name 'test_*.py' ! -name '*_test.py' | sort
