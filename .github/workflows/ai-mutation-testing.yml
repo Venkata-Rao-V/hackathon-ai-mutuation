@@ -2,7 +2,7 @@ name: AI Mutation Testing CI
 
 run-name: >-
   AI Mutation Testing (${{ github.event_name == 'workflow_dispatch' &&
-  format('manual | branch={0} | scope={1}', inputs.target_branch, inputs.mutation_scope) ||
+  format('manual | branch={0} | scope={1} | langs={2}', inputs.target_branch, inputs.mutation_scope, inputs.mutation_languages) ||
   github.ref_name }})
 
 on:
@@ -25,79 +25,50 @@ on:
         options:
           - main
           - develop
-
       mutation_scope:
-        description: "Folder to scan for Python mutation targets"
+        description: "Folder to scan for mutation targets"
         required: true
         type: string
         default: agent
-
-      run_lint:
-        description: "Run lint stage"
+      mutation_languages:
+        description: "Languages to run mutation testing on"
         required: true
-        type: boolean
-        default: true
-
-      run_unit_tests:
-        description: "Run Python unit tests"
-        required: true
-        type: boolean
-        default: true
-
+        type: choice
+        default: "all"
+        options:
+          - all
+          - python
+          - c
+          - cpp
+          - python,c
+          - python,cpp
+          - c,cpp
       run_c_tests:
-        description: "Run C compile & test"
-        required: true
+        description: "Run C compile & test job"
+        required: false
         type: boolean
         default: true
-
       run_cpp_tests:
-        description: "Run C++ compile & test"
-        required: true
-        type: boolean
-        default: true
-
-      run_api_service:
-        description: "Run FastAPI smoke test"
-        required: true
-        type: boolean
-        default: true
-
-      run_grafana:
-        description: "Run Grafana dashboard stage"
-        required: true
-        type: boolean
-        default: true
-
-      run_mutation:
-        description: "Run mutation testing"
-        required: true
-        type: boolean
-        default: true
-
-      run_e2e:
-        description: "Run full E2E orchestration"
-        required: true
+        description: "Run C++ compile & test job"
+        required: false
         type: boolean
         default: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PYTHON_VERSION: "3.11"
-  SERVICE_URL: "http://127.0.0.1:8000"
-  GRAFANA_URL: "http://127.0.0.1:3000"
-  GRAFANA_USER: "admin"
-  GRAFANA_PASSWORD: "admin"
+
+permissions:
+  contents: read
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # JOB 1 — Lint & Static Analysis
+  # JOB 1 — Lint (non-blocking)
   # ─────────────────────────────────────────────────────────────
   lint:
-    name: "1 · Lint & Static Analysis"
+    name: "1 · Lint (Non-Blocking)"
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lint }}
-
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -105,57 +76,36 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Debug trigger inputs
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref_name=${{ github.ref_name }}"
-          echo "head_ref=${{ github.head_ref }}"
-          echo "target_branch=${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || 'auto' }}"
-          echo "mutation_scope=${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-
-      - name: Install lint tools
-        run: |
-          pip install flake8 flake8-bugbear flake8-html
-
+      - name: Install flake8
+        run: pip install flake8 flake8-bugbear flake8-html
       - name: Generate flake8 HTML report
+        shell: bash
         run: |
           mkdir -p reports/flake8-html
-
-          PY_FILES=$(find agent -type f -name '*.py' | sort | tr '\n' ' ')
-          ROOT_PY=$(find . -maxdepth 1 -type f -name '*.py' | sort | tr '\n' ' ')
-
+          PY_FILES=$(find agent -type f -name '*.py' 2>/dev/null | sort | tr '\n' ' ')
+          ROOT_PY=$(find . -maxdepth 1 -type f -name '*.py' 2>/dev/null | sort | tr '\n' ' ')
           if [ -z "$PY_FILES$ROOT_PY" ]; then
-            cat > reports/flake8-html/index.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Flake8 Report</title></head>
-            <body><h1>No Python files found to lint.</h1></body>
-            </html>
-            EOF
+            python3 -c "
+          from pathlib import Path
+          Path('reports/flake8-html/index.html').write_text(
+              '<html><body><h1>No Python files found to lint.</h1></body></html>', encoding='utf-8')"
             exit 0
           fi
-
           flake8 $PY_FILES $ROOT_PY \
             --max-line-length=120 \
             --extend-ignore=E203,W503,E501,W293,E261,E302,E305,E201,E202,F401,B007,E127 \
-            --format=html \
-            --htmldir=reports/flake8-html \
-            --statistics || true
-
-      - name: Upload lint report
+            --format=html --htmldir=reports/flake8-html --statistics || true
+      - name: Upload flake8 report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -170,15 +120,12 @@ jobs:
     name: "2 · Python Unit Tests"
     runs-on: ubuntu-latest
     needs: lint
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_unit_tests) }}
-
     outputs:
-      total: ${{ steps.metrics.outputs.total }}
-      passed: ${{ steps.metrics.outputs.passed }}
-      failed: ${{ steps.metrics.outputs.failed }}
-      errors: ${{ steps.metrics.outputs.errors }}
+      total:   ${{ steps.metrics.outputs.total }}
+      passed:  ${{ steps.metrics.outputs.passed }}
+      failed:  ${{ steps.metrics.outputs.failed }}
+      errors:  ${{ steps.metrics.outputs.errors }}
       skipped: ${{ steps.metrics.outputs.skipped }}
-
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -186,114 +133,91 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest-html junit2html
-
+          pip install pytest pytest-html junit2html
       - name: Create reports directory
         run: mkdir -p reports
-
-      - name: Discover Python test files
+      - name: Collect Python source & test files
+        shell: bash
         run: |
-          find agent -type f \( -name 'test_*.py' -o -name '*_test.py' \) | sort > reports/pytest-files.txt
-          echo "Discovered Python test files:"
-          cat reports/pytest-files.txt || true
-
-      - name: Run pytest and generate HTML report
+          mkdir -p reports/python-sources/agent
+          find agent -type f -name '*.py' 2>/dev/null | while read f; do
+            dest="reports/python-sources/$f"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+          find agent -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
+            | sort > reports/pytest-files.txt
+          echo "=== Test files discovered ===" && cat reports/pytest-files.txt || true
+      - name: Run pytest
         shell: bash
         run: |
           set +e
-
           if [ ! -s reports/pytest-files.txt ]; then
-            echo "No Python test files found under agent/"
-            cat > reports/pytest-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Pytest Report</title></head>
-            <body><h1>No Python test files found under agent/</h1></body>
-            </html>
-            EOF
+            echo "No Python test files found."
+            python3 -c "
+          from pathlib import Path
+          Path('reports/pytest-report.html').write_text(
+              '<html><body><h1>No test files found.</h1></body></html>', encoding='utf-8')"
             echo "0" > reports/pytest-exit-code.txt
             exit 0
           fi
-
           TEST_FILES=$(tr '\n' ' ' < reports/pytest-files.txt)
-          python -m pytest $TEST_FILES \
-            -v \
-            --tb=short \
+          python -m pytest $TEST_FILES -v --tb=short \
             --junitxml=reports/pytest-results.xml \
             --html=reports/pytest-report.html \
-            --self-contained-html \
-            --no-header
-
+            --self-contained-html --no-header
           echo "$?" > reports/pytest-exit-code.txt
           set -e
-
       - name: Convert JUnit XML to HTML
         run: |
           if [ -f reports/pytest-results.xml ]; then
             junit2html reports/pytest-results.xml reports/pytest-junit-report.html || true
-          else
-            cat > reports/pytest-junit-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>JUnit Report</title></head>
-            <body><h1>No JUnit XML generated.</h1></body>
-            </html>
-            EOF
           fi
-
       - name: Parse pytest metrics
         id: metrics
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import os
           import xml.etree.ElementTree as ET
-
           total = passed = failed = errors = skipped = 0
-
           xml_file = "reports/pytest-results.xml"
           if os.path.exists(xml_file):
               root = ET.parse(xml_file).getroot()
               suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
               for suite in suites:
-                  total += int(suite.attrib.get("tests", 0))
-                  failed += int(suite.attrib.get("failures", 0))
-                  errors += int(suite.attrib.get("errors", 0))
-                  skipped += int(suite.attrib.get("skipped", 0))
-
+                  total   += int(suite.attrib.get("tests",    0))
+                  failed  += int(suite.attrib.get("failures", 0))
+                  errors  += int(suite.attrib.get("errors",   0))
+                  skipped += int(suite.attrib.get("skipped",  0))
           passed = max(total - failed - errors - skipped, 0)
-
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"total={total}\n")
-              f.write(f"passed={passed}\n")
-              f.write(f"failed={failed}\n")
-              f.write(f"errors={errors}\n")
-              f.write(f"skipped={skipped}\n")
+              f.write(f"total={total}\npassed={passed}\nfailed={failed}\nerrors={errors}\nskipped={skipped}\n")
+          print(f"pytest: total={total} passed={passed} failed={failed}")
           PY
-
-      - name: Upload pytest report
+      - name: Upload pytest artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-html
+          name: python-test-results
           path: |
             reports/pytest-report.html
             reports/pytest-junit-report.html
+            reports/pytest-results.xml
+            reports/pytest-files.txt
+            reports/python-sources/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
@@ -305,14 +229,12 @@ jobs:
     needs: lint
     continue-on-error: true
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_c_tests) }}
-
     outputs:
-      files: ${{ steps.metrics.outputs.files }}
+      files:        ${{ steps.metrics.outputs.files }}
       compile_pass: ${{ steps.metrics.outputs.compile_pass }}
       compile_fail: ${{ steps.metrics.outputs.compile_fail }}
-      run_pass: ${{ steps.metrics.outputs.run_pass }}
-      run_fail: ${{ steps.metrics.outputs.run_fail }}
-
+      run_pass:     ${{ steps.metrics.outputs.run_pass }}
+      run_fail:     ${{ steps.metrics.outputs.run_fail }}
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -320,140 +242,76 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
       - name: Install build tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc make
-
+        run: sudo apt-get update -qq && sudo apt-get install -y gcc make
       - name: Create reports directory
         run: mkdir -p reports
-
-      - name: Discover C test files
-        working-directory: agent
+      - name: Collect C files
+        shell: bash
         run: |
-          find . -type f -name 'test_*.c' | sort > ../reports/c-test-files.txt
-          echo "Discovered C test files:"
-          cat ../reports/c-test-files.txt || true
-
+          mkdir -p reports/c-sources
+          find agent -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null | while read f; do
+            cp "$f" "reports/c-sources/$(basename "$f")"
+          done
+          find agent -type f -name 'test_*.c' | sort > reports/c-test-files.txt
+          echo "=== C test files ===" && cat reports/c-test-files.txt || true
       - name: Compile and run C tests
         id: metrics
-        working-directory: agent
         shell: bash
         run: |
           set +e
-          LOG="../reports/c-build.log"
-          : > "$LOG"
-
-          FILES=0
-          COMPILE_PASS=0
-          COMPILE_FAIL=0
-          RUN_PASS=0
-          RUN_FAIL=0
-
-          if [ ! -s ../reports/c-test-files.txt ]; then
+          LOG="reports/c-build.log"; : > "$LOG"
+          FILES=0; COMPILE_PASS=0; COMPILE_FAIL=0; RUN_PASS=0; RUN_FAIL=0
+          if [ ! -s reports/c-test-files.txt ]; then
             echo "No C test files discovered." | tee -a "$LOG"
           else
             while read -r TEST_FILE; do
               [ -z "$TEST_FILE" ] && continue
               FILES=$((FILES + 1))
-
               BASENAME=$(basename "$TEST_FILE")
-              STEM="${BASENAME#test_}"
-              STEM="${STEM%.c}"
+              STEM="${BASENAME#test_}"; STEM="${STEM%.c}"
               DIR=$(dirname "$TEST_FILE")
-
-              SRC=""
-              if [ -f "$DIR/${STEM}.c" ]; then
-                SRC="$DIR/${STEM}.c"
-              fi
-
-              OUT="$DIR/${STEM}_c_test"
-
+              SRC=""; [ -f "$DIR/${STEM}.c" ] && SRC="$DIR/${STEM}.c"
+              OUT="/tmp/${STEM}_c_test"
+              INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
               echo "========================================" | tee -a "$LOG"
-              echo "C TEST FILE : $TEST_FILE" | tee -a "$LOG"
-              echo "C SOURCE    : ${SRC:-<none>}" | tee -a "$LOG"
-              echo "OUTPUT      : $OUT" | tee -a "$LOG"
-
+              echo "C TEST : $TEST_FILE | SRC: ${SRC:-none}" | tee -a "$LOG"
               if [ -n "$SRC" ]; then
-                gcc -std=c11 -Wall -I. -o "$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
+                gcc -std=c11 -Wall $INCLUDES -o "$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
               else
-                gcc -std=c11 -Wall -I. -o "$OUT" "$TEST_FILE" >> "$LOG" 2>&1
+                gcc -std=c11 -Wall $INCLUDES -o "$OUT" "$TEST_FILE" >> "$LOG" 2>&1
               fi
-
               if [ $? -eq 0 ]; then
                 COMPILE_PASS=$((COMPILE_PASS + 1))
                 echo "[BUILD PASS] $TEST_FILE" | tee -a "$LOG"
                 "$OUT" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
-                  RUN_PASS=$((RUN_PASS + 1))
-                  echo "[RUN PASS] $OUT" | tee -a "$LOG"
+                  RUN_PASS=$((RUN_PASS + 1)); echo "[RUN PASS]" | tee -a "$LOG"
                 else
-                  RUN_FAIL=$((RUN_FAIL + 1))
-                  echo "[RUN FAIL] $OUT" | tee -a "$LOG"
+                  RUN_FAIL=$((RUN_FAIL + 1)); echo "[RUN FAIL]" | tee -a "$LOG"
                 fi
               else
                 COMPILE_FAIL=$((COMPILE_FAIL + 1))
                 echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
               fi
-            done < ../reports/c-test-files.txt
+            done < reports/c-test-files.txt
           fi
-
-          {
-            echo "files=$FILES"
-            echo "compile_pass=$COMPILE_PASS"
-            echo "compile_fail=$COMPILE_FAIL"
-            echo "run_pass=$RUN_PASS"
-            echo "run_fail=$RUN_FAIL"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Generate C HTML report
-        run: |
-          python - <<'PY'
-          import html
-          from pathlib import Path
-
-          log_path = Path("reports/c-build.log")
-          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C build log found."
-
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>C Build Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{
-                background: #111827;
-                color: #f9fafb;
-                padding: 16px;
-                border-radius: 8px;
-                white-space: pre-wrap;
-              }}
-            </style>
-          </head>
-          <body>
-            <h1>C Build & Test Report</h1>
-            <pre>{html.escape(content)}</pre>
-          </body>
-          </html>"""
-          Path("reports/c-report.html").write_text(report, encoding="utf-8")
-          PY
-
-      - name: Upload C report
+          { echo "files=$FILES"; echo "compile_pass=$COMPILE_PASS"; echo "compile_fail=$COMPILE_FAIL"
+            echo "run_pass=$RUN_PASS"; echo "run_fail=$RUN_FAIL"; } >> "$GITHUB_OUTPUT"
+      - name: Upload C artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: c-html
+          name: c-test-results
           path: |
             reports/c-build.log
-            reports/c-report.html
+            reports/c-test-files.txt
+            reports/c-sources/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
@@ -465,14 +323,12 @@ jobs:
     needs: lint
     continue-on-error: true
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests) }}
-
     outputs:
-      files: ${{ steps.metrics.outputs.files }}
+      files:        ${{ steps.metrics.outputs.files }}
       compile_pass: ${{ steps.metrics.outputs.compile_pass }}
       compile_fail: ${{ steps.metrics.outputs.compile_fail }}
-      run_pass: ${{ steps.metrics.outputs.run_pass }}
-      run_fail: ${{ steps.metrics.outputs.run_fail }}
-
+      run_pass:     ${{ steps.metrics.outputs.run_pass }}
+      run_fail:     ${{ steps.metrics.outputs.run_fail }}
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -480,156 +336,101 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
       - name: Install build tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y g++ make
-
+        run: sudo apt-get update -qq && sudo apt-get install -y g++ make
       - name: Create reports directory
         run: mkdir -p reports
-
-      - name: Discover C++ test files
-        working-directory: agent
+      - name: Collect C++ files
+        shell: bash
         run: |
-          find . -type f \( -name 'test_*.cpp' -o -name 'test_*.cc' \) | sort > ../reports/cpp-test-files.txt
-          echo "Discovered C++ test files:"
-          cat ../reports/cpp-test-files.txt || true
-
+          mkdir -p reports/cpp-sources
+          find agent -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.h' -o -name '*.hpp' \) \
+            2>/dev/null | while read f; do cp "$f" "reports/cpp-sources/$(basename "$f")"; done
+          find agent -type f \( -name 'test_*.cpp' -o -name 'test_*.cc' \) \
+            | sort > reports/cpp-test-files.txt
+          echo "=== C++ test files ===" && cat reports/cpp-test-files.txt || true
       - name: Compile and run C++ tests
         id: metrics
-        working-directory: agent
         shell: bash
         run: |
           set +e
-          LOG="../reports/cpp-build.log"
-          : > "$LOG"
-
-          FILES=0
-          COMPILE_PASS=0
-          COMPILE_FAIL=0
-          RUN_PASS=0
-          RUN_FAIL=0
-
-          if [ ! -s ../reports/cpp-test-files.txt ]; then
+          LOG="reports/cpp-build.log"; : > "$LOG"
+          FILES=0; COMPILE_PASS=0; COMPILE_FAIL=0; RUN_PASS=0; RUN_FAIL=0
+          if [ ! -s reports/cpp-test-files.txt ]; then
             echo "No C++ test files discovered." | tee -a "$LOG"
           else
             while read -r TEST_FILE; do
               [ -z "$TEST_FILE" ] && continue
               FILES=$((FILES + 1))
-
-              BASENAME=$(basename "$TEST_FILE")
-              STEM="${BASENAME#test_}"
-              STEM="${STEM%.*}"
-              EXT="${BASENAME##*.}"
-              DIR=$(dirname "$TEST_FILE")
-
+              BASENAME=$(basename "$TEST_FILE"); STEM="${BASENAME#test_}"; STEM="${STEM%.*}"
+              EXT="${BASENAME##*.}"; DIR=$(dirname "$TEST_FILE")
               SRC=""
-              if [ -f "$DIR/${STEM}.${EXT}" ]; then
-                SRC="$DIR/${STEM}.${EXT}"
-              elif [ -f "$DIR/${STEM}.cpp" ]; then
-                SRC="$DIR/${STEM}.cpp"
-              elif [ -f "$DIR/${STEM}.cc" ]; then
-                SRC="$DIR/${STEM}.cc"
+              if   [ -f "$DIR/${STEM}.${EXT}" ]; then SRC="$DIR/${STEM}.${EXT}"
+              elif [ -f "$DIR/${STEM}.cpp"     ]; then SRC="$DIR/${STEM}.cpp"
+              elif [ -f "$DIR/${STEM}.cc"      ]; then SRC="$DIR/${STEM}.cc"
               fi
-
-              OUT="$DIR/${STEM}_cpp_test"
-
-              echo "========================================" | tee -a "$LOG"
-              echo "C++ TEST FILE: $TEST_FILE" | tee -a "$LOG"
-              echo "C++ SOURCE   : ${SRC:-<none>}" | tee -a "$LOG"
-              echo "OUTPUT       : $OUT" | tee -a "$LOG"
-
+              OUT="/tmp/${STEM}_cpp_test"
+              INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
+              echo "========================================"   | tee -a "$LOG"
+              echo "C++ TEST: $TEST_FILE | SRC: ${SRC:-none}" | tee -a "$LOG"
               if [ -n "$SRC" ]; then
-                g++ -std=c++17 -Wall -I. -o "$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
+                g++ -std=c++17 -Wall $INCLUDES -o "$OUT" "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
               else
-                g++ -std=c++17 -Wall -I. -o "$OUT" "$TEST_FILE" >> "$LOG" 2>&1
+                g++ -std=c++17 -Wall $INCLUDES -o "$OUT" "$TEST_FILE" >> "$LOG" 2>&1
               fi
-
               if [ $? -eq 0 ]; then
-                COMPILE_PASS=$((COMPILE_PASS + 1))
-                echo "[BUILD PASS] $TEST_FILE" | tee -a "$LOG"
+                COMPILE_PASS=$((COMPILE_PASS + 1)); echo "[BUILD PASS] $TEST_FILE" | tee -a "$LOG"
                 "$OUT" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
-                  RUN_PASS=$((RUN_PASS + 1))
-                  echo "[RUN PASS] $OUT" | tee -a "$LOG"
+                  RUN_PASS=$((RUN_PASS + 1)); echo "[RUN PASS]" | tee -a "$LOG"
                 else
-                  RUN_FAIL=$((RUN_FAIL + 1))
-                  echo "[RUN FAIL] $OUT" | tee -a "$LOG"
+                  RUN_FAIL=$((RUN_FAIL + 1)); echo "[RUN FAIL]" | tee -a "$LOG"
                 fi
               else
-                COMPILE_FAIL=$((COMPILE_FAIL + 1))
-                echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
+                COMPILE_FAIL=$((COMPILE_FAIL + 1)); echo "[BUILD FAIL] $TEST_FILE" | tee -a "$LOG"
               fi
-            done < ../reports/cpp-test-files.txt
+            done < reports/cpp-test-files.txt
           fi
-
-          {
-            echo "files=$FILES"
-            echo "compile_pass=$COMPILE_PASS"
-            echo "compile_fail=$COMPILE_FAIL"
-            echo "run_pass=$RUN_PASS"
-            echo "run_fail=$RUN_FAIL"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Generate C++ HTML report
-        run: |
-          python - <<'PY'
-          import html
-          from pathlib import Path
-
-          log_path = Path("reports/cpp-build.log")
-          content = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else "No C++ build log found."
-
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>C++ Build Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{
-                background: #111827;
-                color: #f9fafb;
-                padding: 16px;
-                border-radius: 8px;
-                white-space: pre-wrap;
-              }}
-            </style>
-          </head>
-          <body>
-            <h1>C++ Build & Test Report</h1>
-            <pre>{html.escape(content)}</pre>
-          </body>
-          </html>"""
-          Path("reports/cpp-report.html").write_text(report, encoding="utf-8")
-          PY
-
-      - name: Upload C++ report
+          { echo "files=$FILES"; echo "compile_pass=$COMPILE_PASS"; echo "compile_fail=$COMPILE_FAIL"
+            echo "run_pass=$RUN_PASS"; echo "run_fail=$RUN_FAIL"; } >> "$GITHUB_OUTPUT"
+      - name: Upload C++ artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpp-html
+          name: cpp-test-results
           path: |
             reports/cpp-build.log
-            reports/cpp-report.html
+            reports/cpp-test-files.txt
+            reports/cpp-sources/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 4 — FastAPI Service Smoke Test
+  # JOB 4 — Python Mutation Testing
   # ─────────────────────────────────────────────────────────────
-  api_service:
-    name: "4 · FastAPI Service Health & Smoke"
+  mutation_tests:
+    name: "4 · Python Mutation Testing"
     runs-on: ubuntu-latest
     needs: unit_tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_api_service) }}
-
+    continue-on-error: true
+    if: >-
+      ${{
+        always() && (
+          github.event_name != 'workflow_dispatch' ||
+          inputs.mutation_languages == 'all' ||
+          contains(inputs.mutation_languages, 'python')
+        )
+      }}
+    outputs:
+      killed:         ${{ steps.metrics.outputs.killed }}
+      survived:       ${{ steps.metrics.outputs.survived }}
+      timeout:        ${{ steps.metrics.outputs.timeout }}
+      total_mutants:  ${{ steps.metrics.outputs.total_mutants }}
+      mutation_score: ${{ steps.metrics.outputs.mutation_score }}
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -637,379 +438,217 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Discover one Python source and one Python test for API smoke
-        id: discover
+      # Write setup.cfg BEFORE pip installs mutmut — mutmut reads it at import time.
+      # IMPORTANT: the heredoc must NOT be indented — leading spaces make the keys
+      # appear as continuation lines and mutmut ignores them entirely.
+      - name: Determine scope and write setup.cfg [mutmut]
+        id: scope
         shell: bash
         run: |
-          SOURCE_FILE=$(find agent -type f -name '*.py' \
-            ! -name 'test_*.py' \
-            ! -name '*_test.py' \
-            ! -name '__init__.py' \
-            ! -name 'conftest.py' | sort | head -n 1)
+          SCOPE="${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "Mutation scope: $SCOPE"
 
-          TEST_FILE=$(find agent -type f \( -name 'test_*.py' -o -name '*_test.py' \) | sort | head -n 1)
+          # Comma-separated list of dirs containing non-test source .py files
+          SRC_PATHS=$(find "$SCOPE" -type f -name '*.py' \
+            ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null \
+            | xargs -I{} dirname {} 2>/dev/null | sort -u \
+            | tr '\n' ',' | sed 's/,$//')
 
-          echo "source_file=$SOURCE_FILE" >> "$GITHUB_OUTPUT"
-          echo "test_file=$TEST_FILE" >> "$GITHUB_OUTPUT"
+          # Comma-separated list of dirs containing test files
+          TEST_DIRS=$(find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
+            2>/dev/null | xargs -I{} dirname {} 2>/dev/null | sort -u \
+            | tr '\n' ',' | sed 's/,$//')
 
-          echo "Discovered source: $SOURCE_FILE"
-          echo "Discovered test:   $TEST_FILE"
+          # Space-separated list of individual test files for the runner command
+          TEST_FILES=$(find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) \
+            2>/dev/null | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
 
-      - name: Start FastAPI service in background
-        working-directory: agent/services
-        run: |
-          nohup python core_mutation_service.py > ../../reports/fastapi.log 2>&1 &
-          echo "SERVICE_PID=$!" >> $GITHUB_ENV
+          [ -z "$SRC_PATHS" ] && SRC_PATHS="$SCOPE"
+          [ -z "$TEST_DIRS"  ] && TEST_DIRS="$SCOPE"
 
-      - name: Wait for service to be healthy
-        run: |
-          for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.SERVICE_URL }}/health" || true)
-            if [ "$STATUS" = "200" ]; then
-              echo "Service healthy after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Service did not start in time"
-          cat reports/fastapi.log || true
-          exit 1
-
-      - name: Smoke test POST /mutate
-        shell: bash
-        run: |
-          if [ -z "${{ steps.discover.outputs.source_file }}" ] || [ -z "${{ steps.discover.outputs.test_file }}" ]; then
-            cat > reports/mutate-response.json <<'EOF'
-            {"info": "Skipping /mutate smoke test because no source file or test file was discovered under agent/."}
-            EOF
-            exit 0
+          # Build runner — NOTE the space between TEST_FILES and -x (was the bug)
+          if [ -n "$TEST_FILES" ]; then
+            RUNNER="python -m pytest ${TEST_FILES} -x -q --tb=short"
+          else
+            RUNNER="python -m pytest ${SCOPE} -x -q --tb=short"
           fi
 
-          curl -s -X POST "${{ env.SERVICE_URL }}/mutate" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"source_file\": \"${{ steps.discover.outputs.source_file }}\",
-              \"test_file\": \"${{ steps.discover.outputs.test_file }}\",
-              \"language\": \"python\"
-            }" > reports/mutate-response.json
+          echo "source_paths : $SRC_PATHS"
+          echo "tests_dirs   : $TEST_DIRS"
+          echo "runner       : $RUNNER"
 
-      - name: Smoke test GET /sessions
-        run: |
-          curl -s "${{ env.SERVICE_URL }}/sessions" > reports/sessions-response.json
+          # Remove any existing [mutmut] block from setup.cfg
+          if [ -f setup.cfg ]; then
+            python3 -c "
+          import re, pathlib
+          text = pathlib.Path('setup.cfg').read_text(errors='ignore')
+          text = re.sub(r'\[mutmut\].*?(?=\n\[|\Z)', '', text, flags=re.DOTALL)
+          pathlib.Path('setup.cfg').write_text(text.rstrip() + '\n')"
+          fi
 
-      - name: Generate API HTML report
-        run: |
-          python - <<'PY'
-          import json
-          import html
-          from pathlib import Path
+          # Write [mutmut] section — heredoc at column 0, NO leading spaces on keys.
+          # Leading spaces would make mutmut treat them as continuation of previous key.
+cat >> setup.cfg << CFG
 
-          def read_json(path):
-              p = Path(path)
-              if not p.exists():
-                  return {"error": f"{path} not found"}
-              try:
-                  return json.loads(p.read_text(encoding="utf-8"))
-              except Exception as e:
-                  return {"error": str(e)}
+[mutmut]
+source_paths = ${SRC_PATHS}
+tests_dirs = ${TEST_DIRS}
+runner = ${RUNNER}
+CFG
 
-          mutate = read_json("reports/mutate-response.json")
-          sessions = read_json("reports/sessions-response.json")
-          fastapi_log = Path("reports/fastapi.log").read_text(encoding="utf-8", errors="ignore") if Path("reports/fastapi.log").exists() else "No FastAPI log found."
-
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>FastAPI Smoke Report</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
-            </style>
-          </head>
-          <body>
-            <h1>FastAPI Smoke Test Report</h1>
-            <h2>POST /mutate</h2>
-            <pre>{html.escape(json.dumps(mutate, indent=2))}</pre>
-            <h2>GET /sessions</h2>
-            <pre>{html.escape(json.dumps(sessions, indent=2))}</pre>
-            <h2>FastAPI Log</h2>
-            <pre>{html.escape(fastapi_log)}</pre>
-          </body>
-          </html>"""
-          Path("reports/api-report.html").write_text(report, encoding="utf-8")
-          PY
-
-      - name: Upload API report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: api-html
-          path: |
-            reports/api-report.html
-          if-no-files-found: warn
-
-      - name: Terminate FastAPI service
-        if: always()
-        run: kill $SERVICE_PID || true
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 5 — Mutation Testing
-  # ─────────────────────────────────────────────────────────────
-  mutation_run:
-    name: "5 · Mutation Testing (mutmut + AI Agents)"
-    runs-on: ubuntu-latest
-    needs:
-      - unit_tests
-      - c_tests
-      - cpp_tests
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_mutation) }}
-
-    outputs:
-      killed: ${{ steps.metrics.outputs.killed }}
-      survived: ${{ steps.metrics.outputs.survived }}
-      timeout: ${{ steps.metrics.outputs.timeout }}
-      suspicious: ${{ steps.metrics.outputs.suspicious }}
-      no_tests: ${{ steps.metrics.outputs.no_tests }}
-      considered: ${{ steps.metrics.outputs.considered }}
-      mutation_score: ${{ steps.metrics.outputs.mutation_score }}
-
-    steps:
-      - name: Checkout repository (manual run)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
-
-      - name: Checkout repository (push / PR)
-        if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          echo "=== setup.cfg [mutmut] ==="
+          grep -A6 '^\[mutmut\]' setup.cfg || true
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install mutmut pytest
+          pip install "mutmut>=2,<4" pytest pytest-cov
 
-      - name: Create reports directory
+      - name: Clear mutmut cache
+        run: rm -f .mutmut-cache
+
+      - name: Debug — confirm files mutmut will see
+        shell: bash
         run: |
-          mkdir -p reports
-          mkdir -p reports/mutmut-report
-
-      - name: Discover Python mutation candidates
-        run: |
-          SCOPE="${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-          find "$SCOPE" -type f -name '*.py' \
-            ! -name 'test_*.py' \
-            ! -name '*_test.py' \
-            ! -name '__init__.py' \
-            ! -name 'conftest.py' | sort > reports/mutation-candidates.txt || true
-
-          echo "Discovered mutation candidates:"
-          cat reports/mutation-candidates.txt || true
-
-      - name: Generate mutmut config dynamically
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import os
-
-          scope = "${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope || 'agent' }}"
-          test_file_list = Path("reports/pytest-files.txt")
-          cfg_lines = ["[mutmut]"]
-          cfg_lines.append("source_paths=")
-          cfg_lines.append(f"    {scope}")
-          cfg_lines.append("pytest_add_cli_args_test_selection=")
-
-          test_txt = Path("reports/pytest-files.txt")
-          if test_txt.exists() and test_txt.read_text(encoding="utf-8").strip():
-              for line in test_txt.read_text(encoding="utf-8").splitlines():
-                  line = line.strip()
-                  if line:
-                      cfg_lines.append(f"    {line}")
-          else:
-              cfg_lines.append("    agent")
-
-          cfg_lines.append("do_not_mutate=")
-          cfg_lines.append("    */test_*.py")
-          cfg_lines.append("    */*_test.py")
-          cfg_lines.append("    */__init__.py")
-          cfg_lines.append("    */conftest.py")
-
-          Path("setup.cfg").write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
-          print(Path("setup.cfg").read_text(encoding="utf-8"))
-          PY
+          SCOPE="${{ steps.scope.outputs.scope }}"
+          echo "=== mutmut version ===" && mutmut --version
+          echo "=== setup.cfg [mutmut] ==="
+          grep -A10 '^\[mutmut\]' setup.cfg || echo "NOT FOUND"
+          echo "=== Source files ===" && find "$SCOPE" -type f -name '*.py' ! -name 'test_*.py' ! -name '*_test.py' | sort
+          echo "=== Test files ===" && find "$SCOPE" -type f \( -name 'test_*.py' -o -name '*_test.py' \) | sort
 
       - name: Run mutmut
         shell: bash
         run: |
           set +e
-
-          if [ ! -s reports/mutation-candidates.txt ]; then
-            echo "No mutation candidates discovered." > reports/mutmut-results.txt
-            cat > reports/mutation-summary.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Mutation Summary</title></head>
-            <body><h1>No mutation candidates discovered.</h1></body>
-            </html>
-            EOF
-            mkdir -p reports/mutmut-report
-            cat > reports/mutmut-report/index.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Mutmut HTML</title></head>
-            <body><h1>No mutation candidates discovered.</h1></body>
-            </html>
-            EOF
+          mkdir -p reports/mutants
+          SCOPE="${{ steps.scope.outputs.scope }}"
+          SRC_FILES=$(find "$SCOPE" -type f -name '*.py' \
+            ! -name 'test_*.py' ! -name '*_test.py' 2>/dev/null | sort)
+          if [ -z "$SRC_FILES" ]; then
+            echo "No Python source files to mutate in $SCOPE"
+            printf "killed=0\nsurvived=0\ntimeout=0\n" > reports/mutmut-counts.txt
             exit 0
           fi
+          mutmut run 2>&1 | tee reports/mutmut-run.log
+          mutmut results 2>/dev/null | tee reports/mutmut-results.log || true
+          mutmut junitxml > reports/mutmut-results.xml 2>/dev/null || true
 
-          mutmut run
-          mutmut results --all > reports/mutmut-results.txt 2>&1 || true
-          mutmut html || true
-
-          if [ -d html ]; then
-            cp -r html/* reports/mutmut-report/ || true
+          # Layer 1: result-ids subcommand
+          KILLED=$(mutmut result-ids killed   2>/dev/null | grep -c '[0-9]' || echo 0)
+          SURVIVED=$(mutmut result-ids survived 2>/dev/null | grep -c '[0-9]' || echo 0)
+          TIMEOUT=$(mutmut result-ids timeout  2>/dev/null | grep -c '[0-9]' || echo 0)
+          # Layer 2: summary line
+          if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
+            _K=$(grep -oP '\d+(?=\s+killed)'       reports/mutmut-run.log 2>/dev/null | tail -1)
+            _S=$(grep -oP '\d+(?=\s+survived)'     reports/mutmut-run.log 2>/dev/null | tail -1)
+            _T=$(grep -oP '\d+(?=\s+timed?\s*out)' reports/mutmut-run.log 2>/dev/null | tail -1)
+            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT=$_T
+          fi
+          # Layer 3: emoji spinner
+          if [ "${KILLED:-0}" -eq 0 ] && [ "${SURVIVED:-0}" -eq 0 ]; then
+            _K=$(grep -oP '🎉\s*\K\d+' reports/mutmut-run.log 2>/dev/null | tail -1)
+            _S=$(grep -oP '🙁\s*\K\d+' reports/mutmut-run.log 2>/dev/null | tail -1)
+            _T=$(grep -oP '⏰\s*\K\d+'  reports/mutmut-run.log 2>/dev/null | tail -1)
+            [ -n "$_K" ] && KILLED=$_K; [ -n "$_S" ] && SURVIVED=$_S; [ -n "$_T" ] && TIMEOUT=$_T
           fi
 
-          if [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
-            cd agent
-            python run_agents.py || true
-            cd ..
-          else
-            echo "OPENAI_API_KEY not set — skipping AI agent stage." >> reports/mutmut-results.txt
-          fi
+          KILLED=${KILLED:-0}; SURVIVED=${SURVIVED:-0}; TIMEOUT=${TIMEOUT:-0}
+          printf "killed=%s\nsurvived=%s\ntimeout=%s\n" "$KILLED" "$SURVIVED" "$TIMEOUT" > reports/mutmut-counts.txt
+          echo "Summary: killed=$KILLED survived=$SURVIVED timeout=$TIMEOUT"
 
+          # Save diffs for survived mutants
+          SURVIVED_IDS=$(mutmut result-ids survived 2>/dev/null || true)
+          for ID in $SURVIVED_IDS; do
+            [ -z "$ID" ] && continue
+            mutmut show "$ID" > "reports/mutants/mutant-${ID}.diff" 2>/dev/null || true
+          done
           set -e
 
-      - name: Parse real mutmut score
+      - name: Parse mutation metrics
         id: metrics
         run: |
-          python - <<'PY'
-          import os
-          from collections import Counter
-
-          results_file = "reports/mutmut-results.txt"
-          statuses = Counter({
-              "killed": 0,
-              "survived": 0,
-              "timeout": 0,
-              "suspicious": 0,
-              "skipped": 0,
-              "no tests": 0,
-              "not checked": 0,
-              "segfault": 0
-          })
-
-          if os.path.exists(results_file):
-              with open(results_file, encoding="utf-8", errors="ignore") as f:
-                  for raw in f:
-                      line = raw.strip().lower()
-                      if not line:
-                          continue
-                      for status in list(statuses.keys()):
-                          if line.endswith(status) or f": {status}" in line:
-                              statuses[status] += 1
-                              break
-
-          considered = (
-              statuses["killed"]
-              + statuses["survived"]
-              + statuses["timeout"]
-              + statuses["suspicious"]
-              + statuses["no tests"]
-              + statuses["segfault"]
-          )
-          mutation_score = round((statuses["killed"] / considered) * 100, 2) if considered else 0.0
-
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          killed = survived = timeout = 0
+          counts = Path("reports/mutmut-counts.txt")
+          if counts.exists():
+              for line in counts.read_text().splitlines():
+                  k, _, v = line.partition("=")
+                  if v.strip().isdigit():
+                      if k == "killed":   killed   = int(v)
+                      if k == "survived": survived = int(v)
+                      if k == "timeout":  timeout  = int(v)
+          if killed == 0 and survived == 0:
+              log = Path("reports/mutmut-run.log")
+              if log.exists():
+                  text = log.read_text(errors="ignore")
+                  for pat, key in [
+                      (r"(\d+)\s+killed", "killed"), (r"(\d+)\s+survived", "survived"),
+                      (r"(\d+)\s+timed?\s*out", "timeout"),
+                      (r"🎉\s*(\d+)", "killed"), (r"🙁\s*(\d+)", "survived"), (r"⏰\s*(\d+)", "timeout"),
+                  ]:
+                      m = re.search(pat, text, re.IGNORECASE)
+                      if m:
+                          val = int(m.group(1))
+                          if key == "killed":   killed   = max(killed,   val)
+                          if key == "survived": survived = max(survived, val)
+                          if key == "timeout":  timeout  = max(timeout,  val)
+          total = killed + survived + timeout
+          score = round((killed / total) * 100, 2) if total > 0 else 0.0
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"killed={statuses['killed']}\n")
-              f.write(f"survived={statuses['survived']}\n")
-              f.write(f"timeout={statuses['timeout']}\n")
-              f.write(f"suspicious={statuses['suspicious']}\n")
-              f.write(f"no_tests={statuses['no tests']}\n")
-              f.write(f"considered={considered}\n")
-              f.write(f"mutation_score={mutation_score}\n")
+              f.write(f"killed={killed}\nsurvived={survived}\ntimeout={timeout}\n")
+              f.write(f"total_mutants={total}\nmutation_score={score}\n")
+          print(f"Python mutation — killed={killed} survived={survived} timeout={timeout} total={total} score={score}%")
           PY
 
-      - name: Generate mutation summary HTML
-        run: |
-          python - <<'PY'
-          import html
-          from pathlib import Path
-
-          summary = Path("reports/mutmut-results.txt").read_text(encoding="utf-8", errors="ignore") if Path("reports/mutmut-results.txt").exists() else "No mutmut summary found."
-
-          report = f"""<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Mutation Summary</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; margin: 24px; }}
-              pre {{ background: #111827; color: #f9fafb; padding: 16px; border-radius: 8px; white-space: pre-wrap; }}
-            </style>
-          </head>
-          <body>
-            <h1>Mutation Testing Summary</h1>
-            <pre>{html.escape(summary)}</pre>
-          </body>
-          </html>"""
-          Path("reports/mutation-summary.html").write_text(report, encoding="utf-8")
-          PY
-
-      - name: Upload mutation report
+      - name: Upload mutation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mutation-html
+          name: mutation-test-results
           path: |
-            reports/mutation-summary.html
-            reports/mutmut-report/
+            reports/mutmut-run.log
+            reports/mutmut-results.log
+            reports/mutmut-counts.txt
+            reports/mutmut-results.xml
+            reports/mutants/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 6 — Grafana Dashboard
+  # JOB 4B — C Mutation Testing (universalmutator)
   # ─────────────────────────────────────────────────────────────
-  grafana_update:
-    name: "6 · Grafana Dashboard"
+  c_mutation:
+    name: "4B · C Mutation Testing"
     runs-on: ubuntu-latest
-    needs:
-      - unit_tests
-      - c_tests
-      - cpp_tests
-      - mutation_run
+    needs: c_tests
     continue-on-error: true
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_grafana) }}
-
+    if: >-
+      ${{
+        always() && (
+          github.event_name != 'workflow_dispatch' ||
+          inputs.mutation_languages == 'all' ||
+          contains(inputs.mutation_languages, 'c')
+        ) && (github.event_name != 'workflow_dispatch' || inputs.run_c_tests)
+      }}
+    outputs:
+      killed:   ${{ steps.metrics.outputs.killed }}
+      survived: ${{ steps.metrics.outputs.survived }}
+      total:    ${{ steps.metrics.outputs.total }}
+      score:    ${{ steps.metrics.outputs.score }}
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -1017,414 +656,479 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
-
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Create reports directory
-        run: mkdir -p reports
-
-      - name: Start Grafana container
+      - name: Install tools
         run: |
-          docker run -d --name grafana \
-            -p 3000:3000 \
-            -e GF_SECURITY_ADMIN_USER=${{ env.GRAFANA_USER }} \
-            -e GF_SECURITY_ADMIN_PASSWORD=${{ env.GRAFANA_PASSWORD }} \
-            -e GF_AUTH_ANONYMOUS_ENABLED=true \
-            -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
-            -e GF_AUTH_DISABLE_LOGIN_FORM=true \
-            grafana/grafana:latest
-
-      - name: Wait for Grafana to be healthy
+          sudo apt-get update -qq && sudo apt-get install -y gcc make
+          pip install universalmutator
+      - name: Run C mutation testing
+        id: metrics
+        shell: bash
         run: |
-          for i in $(seq 1 60); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.GRAFANA_URL }}/api/health" || true)
-            if [ "$STATUS" = "200" ]; then
-              echo "Grafana healthy after ${i}s"
-              exit 0
-            fi
-            sleep 2
-          done
-          docker logs grafana || true
-          exit 1
-
-      - name: Create dashboard from real metrics
-        run: |
-          cat > reports/grafana-dashboard.json <<EOF
-          {
-            "dashboard": {
-              "id": null,
-              "uid": "ai-mutation-dashboard",
-              "title": "AI Mutation Dashboard",
-              "tags": ["ci", "mutation", "grafana"],
-              "timezone": "browser",
-              "schemaVersion": 39,
-              "version": 1,
-              "refresh": "10s",
-              "panels": [
-                {
-                  "id": 1,
-                  "type": "text",
-                  "title": "Pipeline Metrics",
-                  "gridPos": { "h": 18, "w": 24, "x": 0, "y": 0 },
-                  "options": {
-                    "mode": "markdown",
-                    "content": "## AI Mutation Testing Dashboard\n\n**Pytest**\n- Total: **${{ needs.unit_tests.outputs.total }}**\n- Passed: **${{ needs.unit_tests.outputs.passed }}**\n- Failed: **${{ needs.unit_tests.outputs.failed }}**\n- Errors: **${{ needs.unit_tests.outputs.errors }}**\n- Skipped: **${{ needs.unit_tests.outputs.skipped }}**\n\n**C**\n- Files: **${{ needs.c_tests.outputs.files }}**\n- Compile pass: **${{ needs.c_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.c_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.c_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.c_tests.outputs.run_fail }}**\n\n**C++**\n- Files: **${{ needs.cpp_tests.outputs.files }}**\n- Compile pass: **${{ needs.cpp_tests.outputs.compile_pass }}**\n- Compile fail: **${{ needs.cpp_tests.outputs.compile_fail }}**\n- Run pass: **${{ needs.cpp_tests.outputs.run_pass }}**\n- Run fail: **${{ needs.cpp_tests.outputs.run_fail }}**\n\n**Mutation**\n- Killed: **${{ needs.mutation_run.outputs.killed }}**\n- Survived: **${{ needs.mutation_run.outputs.survived }}**\n- No tests: **${{ needs.mutation_run.outputs.no_tests }}**\n- Timeout: **${{ needs.mutation_run.outputs.timeout }}**\n- Suspicious: **${{ needs.mutation_run.outputs.suspicious }}**\n- Considered: **${{ needs.mutation_run.outputs.considered }}**\n- Real Mutation Score: **${{ needs.mutation_run.outputs.mutation_score }}%**"
-                  }
-                }
-              ]
-            },
-            "overwrite": true
-          }
-          EOF
-
-          curl -s -u "${{ env.GRAFANA_USER }}:${{ env.GRAFANA_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -X POST "${{ env.GRAFANA_URL }}/api/dashboards/db" \
-            --data @reports/grafana-dashboard.json > reports/grafana-create-response.json
-
-      - name: Resolve dashboard URL
-        run: |
-          python - <<'PY' >> $GITHUB_ENV
-          import json
-          import os
-          from pathlib import Path
-
-          default_url = "http://127.0.0.1:3000/d/ai-mutation-dashboard/ai-mutation-dashboard?orgId=1&kiosk"
-
-          p = Path("reports/grafana-create-response.json")
-          if p.exists():
-              try:
-                  data = json.loads(p.read_text(encoding="utf-8"))
-                  url = data.get("url")
-                  if url:
-                      print(f"DASHBOARD_URL=http://127.0.0.1:3000{url}?orgId=1&kiosk")
-                  else:
-                      print(f"DASHBOARD_URL={default_url}")
-              except Exception:
-                  print(f"DASHBOARD_URL={default_url}")
-          else:
-              print(f"DASHBOARD_URL={default_url}")
-          PY
-
-      - name: Install Playwright
-        run: |
-          npm init -y >/dev/null 2>&1 || true
-          npm install playwright >/dev/null 2>&1
-          npx playwright install --with-deps chromium
-
-      - name: Capture Grafana screenshot
-        env:
-          DASHBOARD_URL: ${{ env.DASHBOARD_URL }}
-        run: |
-          node - <<'NODE'
-          const { chromium } = require('playwright');
-
-          (async () => {
-            const browser = await chromium.launch({ headless: true });
-            const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
-
-            const url = process.env.DASHBOARD_URL || 'http://127.0.0.1:3000/d/ai-mutation-dashboard/ai-mutation-dashboard?orgId=1&kiosk';
-            await page.goto(url, { waitUntil: 'networkidle', timeout: 120000 });
-            await page.waitForTimeout(5000);
-
-            await page.screenshot({
-              path: 'reports/grafana-dashboard.png',
-              fullPage: true
-            });
-
-            await browser.close();
-          })();
-          NODE
-
-      - name: Generate Grafana HTML report
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          report = """<!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Grafana Dashboard</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 24px; }
-              img { max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; }
-            </style>
-          </head>
-          <body>
-            <h1>Grafana Dashboard</h1>
-            <p>Captured during workflow execution.</p>
-            <img src="grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
-          </body>
-          </html>"""
-
-          Path("reports/grafana-report.html").write_text(report, encoding="utf-8")
-          PY
-
-      - name: Upload Grafana report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: grafana-html
-          path: |
-            reports/grafana-report.html
-            reports/grafana-dashboard.png
-          if-no-files-found: warn
-
-      - name: Stop Grafana container
-        if: always()
-        run: |
-          docker stop grafana || true
-          docker rm grafana || true
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 7 — Full End-to-End Orchestration
-  # ─────────────────────────────────────────────────────────────
-  e2e_verify:
-    name: "7 · Full E2E Orchestration (run_all.py)"
-    runs-on: ubuntu-latest
-    needs:
-      - api_service
-      - mutation_run
-      - grafana_update
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_e2e) }}
-
-    steps:
-      - name: Checkout repository (manual run)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.target_branch }}
-          fetch-depth: 1
-
-      - name: Checkout repository (push / PR)
-        if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run full E2E orchestration
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python run_all.py || true
-
-      - name: Create fallback E2E HTML if missing
-        run: |
-          if [ ! -f baseline-report.html ]; then
-            cat > baseline-report.html <<'EOF'
-            <!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>E2E Report</title></head>
-            <body><h1>baseline-report.html was not generated.</h1></body>
-            </html>
-            EOF
+          set +e
+          mkdir -p reports/c-mutants
+          LOG="reports/c-mutation.log"; : > "$LOG"
+          KILLED=0; SURVIVED=0; TOTAL=0
+          SRC_FILES=$(find agent -type f -name '*.c' ! -name 'test_*.c' 2>/dev/null | sort)
+          if [ -z "$SRC_FILES" ]; then
+            echo "No C source files to mutate." | tee -a "$LOG"
+          else
+            for SRC in $SRC_FILES; do
+              STEM=$(basename "$SRC" .c); DIR=$(dirname "$SRC")
+              TEST_FILE="$DIR/test_${STEM}.c"
+              if [ ! -f "$TEST_FILE" ]; then
+                echo "SKIP (no test): $SRC" | tee -a "$LOG"; continue
+              fi
+              MUTANT_DIR="reports/c-mutants/${STEM}"
+              mkdir -p "$MUTANT_DIR"
+              INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
+              echo "========================================" | tee -a "$LOG"
+              echo "Mutating: $SRC | Test: $TEST_FILE"       | tee -a "$LOG"
+              mutate "$SRC" --mutantDir "$MUTANT_DIR" >> "$LOG" 2>&1 || true
+              MCOUNT=$(find "$MUTANT_DIR" -name '*.c' | wc -l)
+              echo "Generated $MCOUNT mutants" | tee -a "$LOG"
+              gcc -std=c11 -Wall $INCLUDES -o /tmp/orig_c_test "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
+              if [ $? -ne 0 ]; then
+                echo "BASELINE COMPILE FAIL — skip" | tee -a "$LOG"; continue
+              fi
+              /tmp/orig_c_test >> "$LOG" 2>&1; BASELINE=$?
+              echo "Baseline exit: $BASELINE" | tee -a "$LOG"
+              for MUTANT in "$MUTANT_DIR"/*.c; do
+                [ -f "$MUTANT" ] || continue
+                TOTAL=$((TOTAL + 1))
+                MID=$(basename "$MUTANT" .c)
+                gcc -std=c11 -Wall $INCLUDES -o /tmp/mut_c_test "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
+                if [ $? -ne 0 ]; then
+                  KILLED=$((KILLED + 1)); echo "[KILLED-COMPILE] $MID" | tee -a "$LOG"; continue
+                fi
+                /tmp/mut_c_test >> "$LOG" 2>&1; RUN_EXIT=$?
+                if [ "$RUN_EXIT" -ne "$BASELINE" ]; then
+                  KILLED=$((KILLED + 1)); echo "[KILLED] $MID" | tee -a "$LOG"
+                else
+                  SURVIVED=$((SURVIVED + 1)); echo "[SURVIVED] $MID" | tee -a "$LOG"
+                  diff "$SRC" "$MUTANT" > "$MUTANT_DIR/${MID}.diff" 2>/dev/null || true
+                fi
+              done
+            done
           fi
-
-      - name: Upload E2E report
+          SCORE=$(python3 -c "print(round($KILLED/$TOTAL*100,2) if $TOTAL>0 else 0.0)" || echo 0)
+          echo "C mutation: killed=$KILLED survived=$SURVIVED total=$TOTAL score=$SCORE%" | tee -a "$LOG"
+          { echo "killed=$KILLED"; echo "survived=$SURVIVED"
+            echo "total=$TOTAL";   echo "score=$SCORE"; } >> "$GITHUB_OUTPUT"
+          set -e
+      - name: Upload C mutation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-html
-          path: baseline-report.html
+          name: c-mutation-results
+          path: |
+            reports/c-mutation.log
+            reports/c-mutants/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 8 — Final Combined HTML Report
+  # JOB 4C — C++ Mutation Testing (universalmutator)
   # ─────────────────────────────────────────────────────────────
-  report:
-    name: "8 · Final HTML Report"
+  cpp_mutation:
+    name: "4C · C++ Mutation Testing"
     runs-on: ubuntu-latest
+    needs: cpp_tests
+    continue-on-error: true
+    if: >-
+      ${{
+        always() && (
+          github.event_name != 'workflow_dispatch' ||
+          inputs.mutation_languages == 'all' ||
+          contains(inputs.mutation_languages, 'cpp')
+        ) && (github.event_name != 'workflow_dispatch' || inputs.run_cpp_tests)
+      }}
+    outputs:
+      killed:   ${{ steps.metrics.outputs.killed }}
+      survived: ${{ steps.metrics.outputs.survived }}
+      total:    ${{ steps.metrics.outputs.total }}
+      score:    ${{ steps.metrics.outputs.score }}
+    steps:
+      - name: Checkout repository (manual run)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 1
+      - name: Checkout repository (push / PR)
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y g++ make
+          pip install universalmutator
+      - name: Run C++ mutation testing
+        id: metrics
+        shell: bash
+        run: |
+          set +e
+          mkdir -p reports/cpp-mutants
+          LOG="reports/cpp-mutation.log"; : > "$LOG"
+          KILLED=0; SURVIVED=0; TOTAL=0
+          SRC_FILES=$(find agent -type f \( -name '*.cpp' -o -name '*.cc' \) \
+            ! -name 'test_*' 2>/dev/null | sort)
+          if [ -z "$SRC_FILES" ]; then
+            echo "No C++ source files to mutate." | tee -a "$LOG"
+          else
+            for SRC in $SRC_FILES; do
+              STEM_FULL=$(basename "$SRC"); STEM="${STEM_FULL%.*}"; DIR=$(dirname "$SRC")
+              TEST_FILE=""
+              for TRY in "$DIR/test_${STEM}.cpp" "$DIR/test_${STEM}.cc"; do
+                [ -f "$TRY" ] && TEST_FILE="$TRY" && break
+              done
+              if [ -z "$TEST_FILE" ]; then
+                echo "SKIP (no test): $SRC" | tee -a "$LOG"; continue
+              fi
+              MUTANT_DIR="reports/cpp-mutants/${STEM}"
+              mkdir -p "$MUTANT_DIR"
+              INCLUDES="-I. -I${DIR} -I$(dirname "$DIR")"
+              echo "========================================" | tee -a "$LOG"
+              echo "Mutating: $SRC | Test: $TEST_FILE"       | tee -a "$LOG"
+              mutate "$SRC" --mutantDir "$MUTANT_DIR" >> "$LOG" 2>&1 || true
+              MCOUNT=$(find "$MUTANT_DIR" \( -name '*.cpp' -o -name '*.cc' \) | wc -l)
+              echo "Generated $MCOUNT mutants" | tee -a "$LOG"
+              g++ -std=c++17 -Wall $INCLUDES -o /tmp/orig_cpp_test "$SRC" "$TEST_FILE" >> "$LOG" 2>&1
+              if [ $? -ne 0 ]; then
+                echo "BASELINE COMPILE FAIL — skip" | tee -a "$LOG"; continue
+              fi
+              /tmp/orig_cpp_test >> "$LOG" 2>&1; BASELINE=$?
+              echo "Baseline exit: $BASELINE" | tee -a "$LOG"
+              for MUTANT in "$MUTANT_DIR"/*.cpp "$MUTANT_DIR"/*.cc; do
+                [ -f "$MUTANT" ] || continue
+                TOTAL=$((TOTAL + 1))
+                MID_FULL=$(basename "$MUTANT"); MID="${MID_FULL%.*}"
+                g++ -std=c++17 -Wall $INCLUDES -o /tmp/mut_cpp_test "$MUTANT" "$TEST_FILE" >> "$LOG" 2>&1
+                if [ $? -ne 0 ]; then
+                  KILLED=$((KILLED + 1)); echo "[KILLED-COMPILE] $MID" | tee -a "$LOG"; continue
+                fi
+                /tmp/mut_cpp_test >> "$LOG" 2>&1; RUN_EXIT=$?
+                if [ "$RUN_EXIT" -ne "$BASELINE" ]; then
+                  KILLED=$((KILLED + 1)); echo "[KILLED] $MID" | tee -a "$LOG"
+                else
+                  SURVIVED=$((SURVIVED + 1)); echo "[SURVIVED] $MID" | tee -a "$LOG"
+                  diff "$SRC" "$MUTANT" > "$MUTANT_DIR/${MID}.diff" 2>/dev/null || true
+                fi
+              done
+            done
+          fi
+          SCORE=$(python3 -c "print(round($KILLED/$TOTAL*100,2) if $TOTAL>0 else 0.0)" || echo 0)
+          echo "C++ mutation: killed=$KILLED survived=$SURVIVED total=$TOTAL score=$SCORE%" | tee -a "$LOG"
+          { echo "killed=$KILLED"; echo "survived=$SURVIVED"
+            echo "total=$TOTAL";   echo "score=$SCORE"; } >> "$GITHUB_OUTPUT"
+          set -e
+      - name: Upload C++ mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-mutation-results
+          path: |
+            reports/cpp-mutation.log
+            reports/cpp-mutants/
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 5 — Combined HTML Report
+  # Pulls outputs from all jobs and builds one self-contained
+  # report.html showing unit tests + all mutation scores +
+  # killed/survived mutant diffs per language.
+  # ─────────────────────────────────────────────────────────────
+  combined_report:
+    name: "5 · Combined HTML Report"
+    runs-on: ubuntu-latest
+    if: always()
     needs:
-      - lint
       - unit_tests
+      - mutation_tests
       - c_tests
       - cpp_tests
-      - api_service
-      - grafana_update
-      - mutation_run
-      - e2e_verify
-    if: always()
-
+      - c_mutation
+      - cpp_mutation
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-reports
+          path: downloaded/
 
-      - name: Build final HTML report bundle
+      - name: Build combined report
+        env:
+          UT_TOTAL:        ${{ needs.unit_tests.outputs.total    || '0' }}
+          UT_PASSED:       ${{ needs.unit_tests.outputs.passed   || '0' }}
+          UT_FAILED:       ${{ needs.unit_tests.outputs.failed   || '0' }}
+          UT_ERRORS:       ${{ needs.unit_tests.outputs.errors   || '0' }}
+          UT_SKIPPED:      ${{ needs.unit_tests.outputs.skipped  || '0' }}
+          PY_KILLED:       ${{ needs.mutation_tests.outputs.killed        || '0' }}
+          PY_SURVIVED:     ${{ needs.mutation_tests.outputs.survived      || '0' }}
+          PY_TIMEOUT:      ${{ needs.mutation_tests.outputs.timeout       || '0' }}
+          PY_TOTAL:        ${{ needs.mutation_tests.outputs.total_mutants || '0' }}
+          PY_SCORE:        ${{ needs.mutation_tests.outputs.mutation_score || '0' }}
+          C_FILES:         ${{ needs.c_tests.outputs.files        || '0' }}
+          C_COMPILE_PASS:  ${{ needs.c_tests.outputs.compile_pass || '0' }}
+          C_COMPILE_FAIL:  ${{ needs.c_tests.outputs.compile_fail || '0' }}
+          C_RUN_PASS:      ${{ needs.c_tests.outputs.run_pass     || '0' }}
+          C_RUN_FAIL:      ${{ needs.c_tests.outputs.run_fail     || '0' }}
+          C_KILLED:        ${{ needs.c_mutation.outputs.killed    || '0' }}
+          C_SURVIVED:      ${{ needs.c_mutation.outputs.survived  || '0' }}
+          C_TOTAL:         ${{ needs.c_mutation.outputs.total     || '0' }}
+          C_SCORE:         ${{ needs.c_mutation.outputs.score     || '0' }}
+          CPP_FILES:       ${{ needs.cpp_tests.outputs.files        || '0' }}
+          CPP_COMPILE_PASS: ${{ needs.cpp_tests.outputs.compile_pass || '0' }}
+          CPP_COMPILE_FAIL: ${{ needs.cpp_tests.outputs.compile_fail || '0' }}
+          CPP_RUN_PASS:    ${{ needs.cpp_tests.outputs.run_pass     || '0' }}
+          CPP_RUN_FAIL:    ${{ needs.cpp_tests.outputs.run_fail     || '0' }}
+          CPP_KILLED:      ${{ needs.cpp_mutation.outputs.killed    || '0' }}
+          CPP_SURVIVED:    ${{ needs.cpp_mutation.outputs.survived  || '0' }}
+          CPP_TOTAL:       ${{ needs.cpp_mutation.outputs.total     || '0' }}
+          CPP_SCORE:       ${{ needs.cpp_mutation.outputs.score     || '0' }}
+          GH_REPO:         ${{ github.repository }}
+          GH_BRANCH:       ${{ github.ref_name }}
+          GH_SHA:          ${{ github.sha }}
+          GH_RUN_ID:       ${{ github.run_id }}
         run: |
-          mkdir -p final-report/assets
-
-          cp -r all-reports/flake8-html final-report/assets/ || true
-          cp -r all-reports/pytest-html final-report/assets/ || true
-          cp -r all-reports/c-html final-report/assets/ || true
-          cp -r all-reports/cpp-html final-report/assets/ || true
-          cp -r all-reports/api-html final-report/assets/ || true
-          cp -r all-reports/grafana-html final-report/assets/ || true
-          cp -r all-reports/mutation-html final-report/assets/ || true
-          cp -r all-reports/e2e-html final-report/assets/ || true
-
-      - name: Ensure placeholder screenshot exists if Grafana artifact missing
-        run: |
-          if [ ! -f final-report/assets/grafana-html/grafana-dashboard.png ]; then
-            python - <<'PY'
-            from PIL import Image, ImageDraw
-            from pathlib import Path
-
-            out = Path("final-report/assets/grafana-html")
-            out.mkdir(parents=True, exist_ok=True)
-
-            img = Image.new("RGB", (1400, 700), color="white")
-            draw = ImageDraw.Draw(img)
-            draw.text((40, 40), "Grafana screenshot not available.", fill="black")
-            img.save(out / "grafana-dashboard.png")
-
-            html = """<!DOCTYPE html>
-            <html>
-            <head><meta charset="utf-8"><title>Grafana Dashboard</title></head>
-            <body><h1>Grafana screenshot not available.</h1></body>
-            </html>"""
-            (out / "grafana-report.html").write_text(html, encoding="utf-8")
-            PY
-          fi
-
-      - name: Build final index.html
-        run: |
-          python - <<'PY'
+          mkdir -p reports
+          python3 - <<'PY'
+          import os, html, time
           from pathlib import Path
 
-          html = """<!DOCTYPE html>
-          <html>
+          def e(v, cast=int):
+              try: return cast(os.environ.get(v) or 0)
+              except: return cast(0)
+
+          # ── collect data ──────────────────────────────────────────────
+          data = {
+              "repo":   os.environ.get("GH_REPO", ""),
+              "branch": os.environ.get("GH_BRANCH", ""),
+              "sha":    os.environ.get("GH_SHA", "")[:8],
+              "run":    os.environ.get("GH_RUN_ID", ""),
+              "ts":     time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
+              "unit": {
+                  "total": e("UT_TOTAL"), "passed": e("UT_PASSED"),
+                  "failed": e("UT_FAILED"), "errors": e("UT_ERRORS"),
+                  "skipped": e("UT_SKIPPED"),
+              },
+              "py":  { "killed": e("PY_KILLED"), "survived": e("PY_SURVIVED"),
+                       "timeout": e("PY_TIMEOUT"), "total": e("PY_TOTAL"),
+                       "score": e("PY_SCORE", float) },
+              "c":   { "files": e("C_FILES"), "cp": e("C_COMPILE_PASS"),
+                       "cf": e("C_COMPILE_FAIL"), "rp": e("C_RUN_PASS"), "rf": e("C_RUN_FAIL"),
+                       "killed": e("C_KILLED"), "survived": e("C_SURVIVED"),
+                       "total": e("C_TOTAL"), "score": e("C_SCORE", float) },
+              "cpp": { "files": e("CPP_FILES"), "cp": e("CPP_COMPILE_PASS"),
+                       "cf": e("CPP_COMPILE_FAIL"), "rp": e("CPP_RUN_PASS"), "rf": e("CPP_RUN_FAIL"),
+                       "killed": e("CPP_KILLED"), "survived": e("CPP_SURVIVED"),
+                       "total": e("CPP_TOTAL"), "score": e("CPP_SCORE", float) },
+          }
+
+          # ── helpers ───────────────────────────────────────────────────
+          def score_color(s):
+              if s >= 80: return "#22863a"
+              if s >= 50: return "#b08800"
+              return "#cb2431"
+
+          def bar(pct, color):
+              return (f'<div style="background:#e1e4e8;border-radius:4px;height:10px;margin:4px 0">'
+                      f'<div style="width:{min(pct,100):.1f}%;background:{color};height:10px;border-radius:4px"></div></div>')
+
+          def stat(label, value, color="#24292e"):
+              return (f'<div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;'
+                      f'padding:14px 18px;text-align:center">'
+                      f'<div style="font-size:11px;color:#57606a;margin-bottom:4px">{label}</div>'
+                      f'<div style="font-size:26px;font-weight:600;color:{color}">{value}</div></div>')
+
+          def section(title):
+              return (f'<h2 style="font-size:15px;font-weight:600;color:#24292e;'
+                      f'border-bottom:1px solid #d0d7de;padding-bottom:6px;margin:28px 0 14px">{title}</h2>')
+
+          def mut_section(lang, d):
+              sc = d["score"]; color = score_color(sc)
+              killed_pct = (d["killed"] / d["total"] * 100) if d["total"] else 0
+              surv_pct   = (d["survived"] / d["total"] * 100) if d["total"] else 0
+              return f"""
+          <div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:16px 20px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <span style="font-weight:600;font-size:14px">{lang}</span>
+              <span style="font-size:22px;font-weight:700;color:{color}">{sc}%</span>
+            </div>
+            {bar(killed_pct, "#22863a")}
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px">
+              <div style="text-align:center"><div style="font-size:10px;color:#57606a">Total</div>
+                <div style="font-size:18px;font-weight:600">{d["total"]}</div></div>
+              <div style="text-align:center"><div style="font-size:10px;color:#57606a">Killed ✓</div>
+                <div style="font-size:18px;font-weight:600;color:#22863a">{d["killed"]}</div></div>
+              <div style="text-align:center"><div style="font-size:10px;color:#57606a">Survived ✗</div>
+                <div style="font-size:18px;font-weight:600;color:#cb2431">{d["survived"]}</div></div>
+              <div style="text-align:center"><div style="font-size:10px;color:#57606a">Timeout</div>
+                <div style="font-size:18px;font-weight:600;color:#b08800">{d.get("timeout",0)}</div></div>
+            </div>
+          </div>"""
+
+          # ── collect killed/survived diffs ────────────────────────────
+          def collect_diffs(base_dir, ext="*.diff"):
+              diffs = []
+              p = Path(base_dir)
+              if p.exists():
+                  for f in sorted(p.rglob(ext)):
+                      diffs.append((f.stem, f.read_text(errors="ignore")))
+              return diffs
+
+          py_diffs  = collect_diffs("downloaded/mutation-test-results/mutants")
+          c_diffs   = collect_diffs("downloaded/c-mutation-results/c-mutants")
+          cpp_diffs = collect_diffs("downloaded/cpp-mutation-results/cpp-mutants")
+
+          def diff_block(diffs, lang):
+              if not diffs:
+                  return f'<p style="color:#57606a;font-size:13px">No surviving {lang} mutants — all killed ✓</p>'
+              rows = ""
+              for name, content in diffs:
+                  rows += (f'<details style="margin:6px 0;border:1px solid #d0d7de;border-radius:6px">'
+                           f'<summary style="cursor:pointer;padding:8px 12px;font-size:13px;'
+                           f'font-weight:500;background:#f6f8fa;border-radius:6px">{html.escape(name)}</summary>'
+                           f'<pre style="margin:0;padding:14px;font-size:12px;background:#0d1117;color:#c9d1d9;'
+                           f'overflow-x:auto;border-radius:0 0 6px 6px">{html.escape(content)}</pre></details>')
+              return rows
+
+          # ── also grab mutmut run log ──────────────────────────────────
+          py_log = ""
+          log_path = Path("downloaded/mutation-test-results/mutmut-run.log")
+          if log_path.exists():
+              py_log = log_path.read_text(errors="ignore")[-6000:]  # last 6k chars
+
+          # ── unit test pass rate ───────────────────────────────────────
+          u = data["unit"]
+          unit_pct = (u["passed"] / u["total"] * 100) if u["total"] else 0
+          unit_color = score_color(unit_pct)
+
+          # ── overall combined score (all languages) ────────────────────
+          total_killed   = data["py"]["killed"]  + data["c"]["killed"]  + data["cpp"]["killed"]
+          total_mutants  = data["py"]["total"]   + data["c"]["total"]   + data["cpp"]["total"]
+          total_survived = data["py"]["survived"] + data["c"]["survived"] + data["cpp"]["survived"]
+          overall_score  = round(total_killed / total_mutants * 100, 2) if total_mutants else 0.0
+          overall_color  = score_color(overall_score)
+
+          # ── HTML ──────────────────────────────────────────────────────
+          html_out = f"""<!DOCTYPE html>
+          <html lang="en">
           <head>
             <meta charset="utf-8">
-            <title>AI Mutation Testing - Final Report</title>
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>CI Mutation Report — {html.escape(data["repo"])}</title>
             <style>
-              body {
-                font-family: Arial, sans-serif;
-                margin: 24px;
-                background: #f9fafb;
-                color: #111827;
-              }
-              h1, h2 {
-                color: #111827;
-              }
-              .card {
-                background: white;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-                padding: 16px;
-                margin-bottom: 20px;
-                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-              }
-              a {
-                color: #2563eb;
-                text-decoration: none;
-              }
-              a:hover {
-                text-decoration: underline;
-              }
-              img {
-                max-width: 100%;
-                border-radius: 8px;
-                border: 1px solid #d1d5db;
-              }
-              iframe {
-                width: 100%;
-                height: 700px;
-                border: 1px solid #d1d5db;
-                border-radius: 8px;
-                background: white;
-              }
-              ul {
-                line-height: 1.8;
-              }
+              *, *::before, *::after {{ box-sizing: border-box; }}
+              body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+                      margin: 0; padding: 0; background: #fff; color: #24292e; }}
+              .header {{ background: #24292e; color: #fff; padding: 18px 32px; }}
+              .header h1 {{ margin: 0; font-size: 17px; font-weight: 600; }}
+              .header p  {{ margin: 4px 0 0; font-size: 12px; color: #8b949e; }}
+              .body  {{ max-width: 900px; margin: 0 auto; padding: 24px 32px 48px; }}
+              .grid4 {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }}
+              .grid3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }}
+              @media(max-width:600px) {{ .grid4,.grid3 {{ grid-template-columns:repeat(2,1fr); }} }}
             </style>
           </head>
           <body>
-            <h1>AI Mutation Testing - Final HTML Report</h1>
+          <div class="header">
+            <h1>CI Mutation Testing Report</h1>
+            <p>{html.escape(data["repo"])} &nbsp;·&nbsp; branch: {html.escape(data["branch"])}
+               &nbsp;·&nbsp; {html.escape(data["sha"])} &nbsp;·&nbsp; run #{html.escape(data["run"])}
+               &nbsp;·&nbsp; {data["ts"]}</p>
+          </div>
+          <div class="body">
 
-            <div class="card">
-              <h2>Quick Links</h2>
-              <ul>
-                <li><a href="assets/flake8-html/index.html">Lint HTML Report</a></li>
-                <li><a href="assets/pytest-html/pytest-report.html">Pytest HTML Report</a></li>
-                <li><a href="assets/pytest-html/pytest-junit-report.html">Converted JUnit HTML Report</a></li>
-                <li><a href="assets/c-html/c-report.html">C HTML Report</a></li>
-                <li><a href="assets/cpp-html/cpp-report.html">C++ HTML Report</a></li>
-                <li><a href="assets/api-html/api-report.html">FastAPI Smoke HTML Report</a></li>
-                <li><a href="assets/mutation-html/mutation-summary.html">Mutation Summary HTML</a></li>
-                <li><a href="assets/mutation-html/mutmut-report/index.html">Full mutmut HTML Report</a></li>
-                <li><a href="assets/e2e-html/baseline-report.html">E2E Baseline HTML Report</a></li>
-                <li><a href="assets/grafana-html/grafana-report.html">Grafana HTML View</a></li>
-              </ul>
+          {section("Overall Mutation Score (all languages)")}
+          <div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:20px 24px;margin-bottom:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:14px;color:#57606a">Python + C + C++ combined</span>
+              <span style="font-size:32px;font-weight:700;color:{overall_color}">{overall_score}%</span>
             </div>
+            {bar(overall_score, overall_color)}
+            <div class="grid3" style="margin-top:12px">
+              {stat("Total Mutants", total_mutants)}
+              {stat("Killed ✓", total_killed, "#22863a")}
+              {stat("Survived ✗", total_survived, "#cb2431")}
+            </div>
+          </div>
 
-            <div class="card">
-              <h2>Grafana Dashboard Preview</h2>
-              <img src="assets/grafana-html/grafana-dashboard.png" alt="Grafana Dashboard Screenshot">
-            </div>
+          {section("Unit Tests (Python)")}
+          <div class="grid4">
+            {stat("Total", u["total"])}
+            {stat("Passed ✓", u["passed"], "#22863a")}
+            {stat("Failed ✗", u["failed"], "#cb2431")}
+            {stat("Skipped", u["skipped"], "#b08800")}
+          </div>
+          {bar(unit_pct, unit_color)}
 
-            <div class="card">
-              <h2>Pytest Report Preview</h2>
-              <iframe src="assets/pytest-html/pytest-report.html"></iframe>
-            </div>
+          {section("Mutation Testing by Language")}
+          {mut_section("Python", data["py"])}
+          {mut_section("C", data["c"])}
+          {mut_section("C++", data["cpp"])}
 
-            <div class="card">
-              <h2>C Report Preview</h2>
-              <iframe src="assets/c-html/c-report.html"></iframe>
-            </div>
+          {section("C Compile & Run")}
+          <div class="grid4">
+            {stat("Files", data["c"]["files"])}
+            {stat("Compile Pass", data["c"]["cp"], "#22863a")}
+            {stat("Compile Fail", data["c"]["cf"], "#cb2431")}
+            {stat("Run Pass / Fail", f'{data["c"]["rp"]} / {data["c"]["rf"]}')}
+          </div>
 
-            <div class="card">
-              <h2>C++ Report Preview</h2>
-              <iframe src="assets/cpp-html/cpp-report.html"></iframe>
-            </div>
+          {section("C++ Compile & Run")}
+          <div class="grid4">
+            {stat("Files", data["cpp"]["files"])}
+            {stat("Compile Pass", data["cpp"]["cp"], "#22863a")}
+            {stat("Compile Fail", data["cpp"]["cf"], "#cb2431")}
+            {stat("Run Pass / Fail", f'{data["cpp"]["rp"]} / {data["cpp"]["rf"]}')}
+          </div>
 
-            <div class="card">
-              <h2>FastAPI Smoke Report Preview</h2>
-              <iframe src="assets/api-html/api-report.html"></iframe>
-            </div>
+          {section("Killed Mutants — Python (survived diffs)")}
+          {diff_block(py_diffs, "Python")}
 
-            <div class="card">
-              <h2>Mutation Summary Preview</h2>
-              <iframe src="assets/mutation-html/mutation-summary.html"></iframe>
-            </div>
+          {section("Killed Mutants — C (survived diffs)")}
+          {diff_block(c_diffs, "C")}
+
+          {section("Killed Mutants — C++ (survived diffs)")}
+          {diff_block(cpp_diffs, "C++")}
+
+          {section("Python mutmut Run Log (last 6 000 chars)")}
+          <pre style="background:#0d1117;color:#c9d1d9;padding:16px;border-radius:8px;
+                      font-size:12px;overflow-x:auto;white-space:pre-wrap">{html.escape(py_log) if py_log else "No log captured."}</pre>
+
+          </div>
           </body>
-          </html>
-          """
+          </html>"""
 
-          Path("final-report/index.html").write_text(html, encoding="utf-8")
+          Path("reports/combined-report.html").write_text(html_out, encoding="utf-8")
+          print("Combined report written.")
           PY
 
-      - name: Upload final HTML report bundle
+      - name: Upload combined report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-html-report
-          path: final-report/
-          if-no-files-found: warn
+          name: combined-report
+          path: reports/combined-report.html
+          if-no-files-found: error
 
-      - name: Write GitHub Step Summary
-        run: |
-          echo "## AI Mutation Testing - Final Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Final combined HTML report artifact: **final-html-report**" >> $GITHUB_STEP_SUMMARY
-          echo "- Grafana is included as a visible screenshot inside the final HTML report." >> $GITHUB_STEP_SUMMARY
-          echo "- Python, C, and C++ are executed in separate jobs." >> $GITHUB_STEP_SUMMARY
+      # ── Grafana / Prometheus push is commented out ──────────────────
+      # Uncomment and set secrets (PUSHGATEWAY_URL) to re-enable.
+      #
+      # - name: Push to Grafana + Prometheus push-gateway
+      #   env:
+      #     GRAFANA_URL:      "http://127.0.0.1:3000"
+      #     GRAFANA_USER:     "admin"
+      #     GRAFANA_PASSWORD: "admin"
+      #     PUSHGATEWAY_URL:  ${{ secrets.PUSHGATEWAY_URL }}
+      #   run: |
+      #     pip install requests
+      #     python3 - <<'PY'
+      #     import json, os, time, requests
+      #     from pathlib import Path
+      #     # ... restore grafana annotation + prometheus push logic here
+      #     PY
