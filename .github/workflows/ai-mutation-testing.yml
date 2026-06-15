@@ -71,17 +71,17 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -106,7 +106,7 @@ jobs:
             --format=html --htmldir=reports/flake8-html --statistics || true
       # - name: Upload flake8 report
       #   if: always()
-      #   uses: actions/upload-artifact@v4
+      #   uses: actions/upload-artifact@v6
       #   with:
       #     name: flake8-html
       #     path: reports/flake8-html/
@@ -128,17 +128,17 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -208,7 +208,7 @@ jobs:
           PY
       - name: Upload pytest artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: python-test-results
           path: |
@@ -237,13 +237,13 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Install build tools
@@ -304,7 +304,7 @@ jobs:
             echo "run_pass=$RUN_PASS"; echo "run_fail=$RUN_FAIL"; } >> "$GITHUB_OUTPUT"
       - name: Upload C artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: c-test-results
           path: |
@@ -331,13 +331,13 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Install build tools
@@ -399,7 +399,7 @@ jobs:
             echo "run_pass=$RUN_PASS"; echo "run_fail=$RUN_FAIL"; } >> "$GITHUB_OUTPUT"
       - name: Upload C++ artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-test-results
           path: |
@@ -433,17 +433,17 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -631,7 +631,7 @@ jobs:
 
       - name: Upload mutation artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mutation-test-results
           path: |
@@ -666,13 +666,13 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Install tools
@@ -736,7 +736,7 @@ jobs:
           set -e
       - name: Upload C mutation artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: c-mutation-results
           path: |
@@ -768,13 +768,13 @@ jobs:
     steps:
       - name: Checkout repository (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 1
       - name: Checkout repository (push / PR)
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Install tools
@@ -842,7 +842,7 @@ jobs:
           set -e
       - name: Upload C++ mutation artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cpp-mutation-results
           path: |
@@ -869,7 +869,7 @@ jobs:
       - cpp_mutation
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: downloaded/
 
@@ -1124,7 +1124,7 @@ jobs:
 
       - name: Upload combined report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: combined-report
           path: reports/combined-report.html
